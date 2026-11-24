@@ -1,0 +1,19 @@
+# Your own game files: never commit ROMs, in-game saves or save states
+# (save states hold the game's memory and graphics).
+input/
+states/
+*.gb
+*.gbc
+*.sgb
+*.ram
+*.ram.bak
+*.sav
+*.state
+
+# Screenshots and renders of the games
+out/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
