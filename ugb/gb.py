@@ -76,6 +76,38 @@ class Frame:
         else:
             self.bgpal = read_palettes(mem, BCPS, BCPD)
             self.objpal = read_palettes(mem, OCPS, OCPD)
+        # Usually the previous tick's OAM is what was drawn, but games sometimes
+        # rewrite or briefly clear it at other points in the frame (Pokemon does
+        # while printing text). When the last three ticks' tables differ, keep
+        # whichever matches the emulator's picture best.
+        hist = _OAM_HIST.get(id(pb), {})
+        cands = [hist[k] for k in (pb.frame_count - 1, pb.frame_count, pb.frame_count - 2) if k in hist]
+        if len(cands) > 1 and any(not np.array_equal(cands[0], c) for c in cands[1:]):
+            scr = pb.screen.ndarray[:, :, :3]
+            fits = [self._sprite_fit(c, scr) for c in cands]
+            self.oam = cands[int(np.argmax(fits))]   # ties keep the previous tick's
+
+    def _sprite_fit(self, oam, scr):
+        """How well an OAM table explains the picture: matching opaque sprite pixels
+        minus mismatching ones (sampled), using the sprite palettes."""
+        keep = self.oam
+        self.oam = oam
+        score = 0
+        try:
+            for s in self.sprites():
+                px = s['px']
+                ys, xs = np.nonzero(px)
+                y, x = ys + s['y'], xs + s['x']
+                ok = (y >= 0) & (y < 144) & (x >= 0) & (x < 160)
+                if not ok.any():
+                    continue
+                y, x, c = y[ok], x[ok], px[ys[ok], xs[ok]]
+                want = self.objpal[s['pal']][c].astype(int)
+                hit = np.abs(scr[y, x].astype(int) - want).max(-1) <= 40
+                score += int(hit.sum()) - int((~hit).sum())
+        finally:
+            self.oam = keep
+        return score
 
     # ---- layer helpers -------------------------------------------------
     def tile_index(self, tid):
@@ -181,7 +213,7 @@ def note_tick(pb):
     cur = np.array(pb.memory[0xFE00:0xFEA0], np.uint8).reshape(40, 4)
     h = _OAM_HIST.setdefault(id(pb), {})
     h[pb.frame_count] = cur
-    for k in [k for k in h if k < pb.frame_count - 2]:
+    for k in [k for k in h if k < pb.frame_count - 3]:
         del h[k]
     return cur
 

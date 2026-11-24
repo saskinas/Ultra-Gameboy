@@ -132,6 +132,9 @@ _CAVERN = _table(
        0x56, 0x57, 0x5C, 0x5D],
 )
 
+for t in (0x34, 0x36, 0x37):      # ledges you jump down (Route 1 and others)
+    _OVERWORLD[t] = 'L'
+
 TILESETS = {0: _OVERWORLD, 1: _REDS_HOUSE, 4: _REDS_HOUSE, 8: _HOUSE, 2: _CENTER, 6: _CENTER,
             9: _GATE, 10: _GATE, 12: _GATE, 17: _CAVERN, 3: None}
 
@@ -298,6 +301,7 @@ RAMPS = {
     'cloth': hx('#2a0e22', '#5a1a30', '#8e2a3c', '#bc4a4a', '#de7a64', '#f4b090'),
     'metal': hx('#141a28', '#2e3a50', '#52627a', '#7e90a6', '#b4c2d0', '#e8eef4'),
     'furniture': hx('#24120a', '#4a2614', '#74401e', '#9e6230', '#c48a4c', '#e4b878'),
+    'dirt': hx('#2a1810', '#4a2e1a', '#6c4626', '#8e6234', '#ae8048'),
     'earth': hx('#1e1610', '#3e2e22', '#625040', '#8a7460', '#b09a82', '#d4c4aa'),
     'neutral':hx('#202028', '#505060', '#8a8a98', '#c8c8d0', '#f4f4f8'),
     'red': hx('#3a0818', '#6a1022', '#a01c2c', '#d0363a', '#ee6a52', '#fca080'),
@@ -308,6 +312,36 @@ RAMPS = {
     'green': hx('#0c2a18', '#1a4a26', '#2e6e34', '#4e9644', '#80c060'),
     'purple': hx('#1c1040', '#34226a', '#4e3a98', '#6c58c0', '#9a88e0'),
     'teal': hx('#0a2a30', '#14505a', '#207a80', '#40a8a8', '#80d8d0'),
+}
+
+# Check tiles per tileset: (tile number, hash of its pixels), made with
+# tools/make_anchors.py. The tileset number in RAM keeps its last value on the
+# title screen, in the intro and elsewhere, so the labels are only used when
+# these tiles in VRAM really look like that tileset.
+ANCHORS = {
+    0: [(16, '1dbbfd05'), (44, '098b1877')],
+    1: [(35, 'ba5ba83a'), (44, 'a5053186')],
+    2: [(16, '65f56974'), (44, '0c31ba5b')],
+    3: [(35, 'fcfdfe05'), (3, '77657563')],
+    4: [(44, 'a5053186'), (35, 'ba5ba83a')],
+    5: [(16, '202d1aa5'), (1, '956faf3e')],
+    6: [(16, '65f56974'), (40, 'c933af55')],
+    7: [(16, '202d1aa5'), (1, '956faf3e')],
+    8: [(44, 'd4a8cef8'), (35, 'e1e24351')],
+    9: [(44, '8cbcf2ac'), (74, '31d0316a')],
+    10: [(44, '8cbcf2ac'), (35, 'ba5ba83a')],
+    11: [(24, '9397a071'), (21, 'a565ee89')],
+    12: [(74, '31d0316a'), (44, '8cbcf2ac')],
+    13: [(35, '84086d96'), (17, '54a92bfa')],
+    14: [(16, '7131f05a'), (44, '8af78643')],
+    15: [(10, 'f6ca06e9'), (26, 'ba5bd244')],
+    16: [(1, '1cbbb977'), (44, '925394b6')],
+    17: [(16, '91f26742'), (32, '12459e61')],
+    18: [(44, 'd1b65481'), (35, 'ba5ba83a')],
+    19: [(35, 'ba5ba83a'), (4, '809e11f3')],
+    20: [(44, '8c4bbab2'), (35, '63a6fdbd')],
+    21: [(16, '59511670'), (1, '155b48ed')],
+    22: [(42, '6bec79ea'), (58, 'a19a173e')],
 }
 
 # Per-tileset colour changes: caves are warm brown rock, not grey stone.

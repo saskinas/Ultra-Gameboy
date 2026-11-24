@@ -20,9 +20,9 @@ N = 256
 SY, SX = np.mgrid[0:144, 0:160]
 L = np.array([-1.0, -1.0, 1.0], np.float32) / np.sqrt(3)   # light from the top left
 GROUND = ['g', 'l', 'f', 'G', 'F', 'C', 'E']        # receive shadows
-BUILDING = ['R', 'H', 'N', 'D', 'S', 'O', 'M']     # cast shadows
+BUILDING = ['R', 'H', 'N', 'D', 'S', 'O', 'M', 'L']   # cast shadows
 ANIM = ['W', 'f']
-M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOEU?'}   # material codes as bytes (fast compares)
+M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOELU?'}   # material codes as bytes (fast compares)
 
 
 def _set_lut(chars):
@@ -52,6 +52,18 @@ def _interval(dirty_1d):
     start = int(d[(k + 1) % len(d)])
     length = 32 - (int(gaps[k]) - 1)
     return start, length
+
+
+def _border_rows(t):
+    """Top and bottom box borders (Gen 1 tiles), including a title written into one.
+
+    Works on any array of tile numbers (tile grid or per-pixel); rows run along
+    axis 0. Side bars (0x7C) are not included, so text rows don't count.
+    """
+    hz = np.isin(t, (0x79, 0x7A, 0x7B, 0x7D, 0x7E))
+    acc = np.maximum.accumulate
+    between = acc(hz, 1) & acc(hz[:, ::-1], 1)[:, ::-1]
+    return hz | ((t >= 0x80) & between)
 
 
 def _pack(rgb):
@@ -385,6 +397,7 @@ class Enhancer:
         self._anim_keys = set()  # tile keys seen animating in place
         self.frame_no = 0
         self._tileset = None
+        self._last_cols = {}
         self._layers = {0: LayerState(), 1: LayerState()}
         self.stats = {'full': 0, 'band': 0, 'cached': 0}
 
@@ -478,7 +491,17 @@ class Enhancer:
             st.mul[pm] = 1
         if fresh:
             changed[:] = True
-        st.stale |= changed & ~ui_tile
+        # A changed tile also changes how its neighbours look: objects up to two
+        # tiles tall take colour from the tile below them, shadows fall onto the
+        # next row, shore foam reaches into the water. Redraw two tiles around it.
+        grow = changed & ~ui_tile
+        if grow.any() and not grow.all():
+            g = grow.copy()
+            for dy in (-2, -1, 0, 1, 2):
+                for dx in (-2, -1, 0, 1, 2):
+                    g |= np.roll(grow, (dy, dx), (0, 1))
+            grow = g
+        st.stale |= grow
         need = st.stale & vis
         if need.any():
             for r0, rl, c0, cl in self._bands(need):
@@ -718,6 +741,17 @@ class Enhancer:
                     t = np.where(((XX + off_x + YY + off_y) % 7 < 2) & (idx != 3), t + 0.25, t)
                 out[m] = fx.pick(R[ramp], t)[m]
 
+        # ledges: a lit grassy lip, a short dirt face, a shadow below (cast later)
+        m = mat == M['L']
+        if m.any():
+            row = (YY % 8).astype(np.float32)
+            lip = row < 3
+            tg = ch([0.98, 0.8, 0.6, 0.3]) + 0.06 * (ng - 0.5)
+            td = ch([0.7, 0.55, 0.4, 0.12]) - 0.05 * (row - 3) + 0.05 * (ng - 0.5)
+            tg = np.where(row == 2, tg + 0.1, tg)          # the lit edge of the lip
+            out[m & lip] = fx.pick(R['ground'], tg)[m & lip]
+            out[m & ~lip] = fx.pick(R['dirt'], td)[m & ~lip]
+
         # lit objects ----------------------------------------------------------
         edge = obj & ~fx.erode(obj, wrap)
         lit_edge = edge & ~fx.shift(obj, 1, 1, wrap=wrap)
@@ -889,6 +923,11 @@ class Enhancer:
             table = self.p.TILE_KEYS
         else:
             table = None if gs['battle'] else self.p.TILESETS.get(gs['tileset'])
+            anchors = getattr(self.p, 'ANCHORS', {}).get(gs['tileset'])
+            if table and anchors and not all(
+                    hashlib.blake2b(f.tiles[0, int(f.tile_index(t))].tobytes(), digest_size=4).hexdigest() == h
+                    for t, h in anchors):
+                table = None      # not really this tileset on screen (title, intro...)
         by, bx, wy, wx = np.broadcast_arrays(*f.screen_coords())
         # tiles on screen plus one tile of slack, so scrolling never shows a stale tile
         # by depends only on the line and bx only on the line's SCX, so small sets do
@@ -941,8 +980,9 @@ class Enhancer:
         acc = np.maximum.accumulate
         left = acc(frame, 1)
         right = acc(frame[:, ::-1], 1)[:, ::-1]
-        up = acc(frame, 0)
-        down = acc(frame[::-1], 0)[::-1]
+        hframe = _border_rows(r)
+        up = acc(frame | hframe, 0)
+        down = acc((frame | hframe)[::-1], 0)[::-1]
         inside = left & right & up & down
         ok = ui & (frame | inside)
         return np.roll(ok, (oy, ox), (0, 1))
@@ -992,6 +1032,13 @@ class Enhancer:
             if not mask.any():
                 continue
             cols = self._sprite_colours(f, y0, x0) if overworld else None
+            # The game's sprite slots can lag a frame behind what's drawn; keep a
+            # sprite's colours steady instead of flickering to the plain palette.
+            last = self._last_cols.get(g)
+            if cols is None and overworld and last and self.frame_no - last[1] < 90                     and abs(last[2] - y0) <= 16 and abs(last[3] - x0) <= 16:
+                cols = last[0]
+            if cols is not None:
+                self._last_cols[g] = (cols, self.frame_no, y0, x0)
             ys, xs = np.mgrid[y0:y1, x0:x1]
             on = (ys >= 0) & (ys < 144) & (xs >= 0) & (xs < 160)
             if cols is None:
@@ -1062,6 +1109,15 @@ class Enhancer:
                 rows = np.nonzero(ids == r)[0]
                 top[rows, x] = rows[0]
                 length[rows, x] = len(rows)
+        # Prefer each box's own top and bottom border rows, so stacked boxes (a
+        # menu over a dialogue box) each get a whole gradient.
+        hb = _border_rows(stid)
+        rows = np.broadcast_to(SY, hb.shape)
+        btop = np.maximum.accumulate(np.where(hb, rows, -1), axis=0)
+        bbot = np.minimum.accumulate(np.where(hb, rows, 9999)[::-1], axis=0)[::-1]
+        boxed = (btop >= 0) & (bbot < 9999) & (bbot > btop)
+        top = np.where(boxed, btop, top)
+        length = np.where(boxed, bbot - btop + 1, length)
         k = np.clip(((SY - top) * len(steps) // np.maximum(length, 1)), 0, len(steps) - 1)
         frame_tile = (stid >= 0x79) & (stid <= 0x7E)
         ink = ui & (sidx != 0)
