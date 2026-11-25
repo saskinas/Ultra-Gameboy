@@ -40,7 +40,7 @@ def step(n, btn=None):
         f = Frame(pb)
         out = live.render(f)
         fr += 1
-        if fr % 8 == 0:
+        if fr % int(os.environ.get("SEAM_EVERY", "8")) == 0:
             fresh = Enhancer(preset)
             fresh.frame_no = live.frame_no - 1
             ref = fresh.render(f)

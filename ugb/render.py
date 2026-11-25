@@ -496,9 +496,12 @@ class Enhancer:
         # next row, shore foam reaches into the water. Redraw two tiles around it.
         grow = changed & ~ui_tile
         if grow.any() and not grow.all():
+            # at least two tiles, more for this tileset's biggest object (4x4 trees)
+            stamps = self.p.STAMPS.get(self._tileset, []) if isinstance(self.p.STAMPS, dict) else self.p.STAMPS
+            rad = max([2] + [max(len(rows), len(rows[0])) for rows, _ in stamps])
             g = grow.copy()
-            for dy in (-2, -1, 0, 1, 2):
-                for dx in (-2, -1, 0, 1, 2):
+            for dy in range(-rad, rad + 1):          # the tile map wraps, so roll
+                for dx in range(-rad, rad + 1):
                     g |= np.roll(grow, (dy, dx), (0, 1))
             grow = g
         st.stale |= grow
@@ -804,7 +807,9 @@ class Enhancer:
                 if self._anim_keys:
                     at = np.isin(keys, np.fromiter(self._anim_keys, np.int64))
                     anim_px = np.repeat(np.repeat(at, 8, 0), 8, 1)[Y, X]
-                g_out, g_water = generic_shade(raw_rgb[Y, X], wrap and whole, tex=tex, dmg=f.dmg,
+                # only the unlabelled pixels take part: their labelled neighbours
+                # must not tint them (e.g. a black void's edge next to a forest)
+                g_out, g_water = generic_shade(raw_rgb[Y, X], wrap and whole, solid=m[Y, X], tex=tex, dmg=f.dmg,
                                                level=self.generic_level, shade=shade,
                                                noise=(nb[Y, X], ng[Y, X], npx[Y, X], bay[Y, X]),
                                                anim_px=anim_px, want_water=True)
