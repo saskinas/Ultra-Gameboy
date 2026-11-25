@@ -9,8 +9,9 @@ one exists; every other game gets the **generic** enhancer.
 ## Setup
 
 No ROMs are included. Dump your own cartridges and put the files in `input\`.
-The short names `yellow`, `zelda`, `balloon` and `mario` match files containing
-"Pokemon - Yellow", "Link's Awakening", "Balloon Kid" and "Super Mario Land".
+The short names `yellow`, `zelda`, `balloon`, `mario` and `kirby` match files
+containing "Pokemon - Yellow", "Link's Awakening", "Balloon Kid", "Super Mario
+Land" and "Kirby's Dream Land".
 
 ```powershell
 python -m venv .venv
@@ -110,6 +111,12 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
   World 3, bamboo and clouds in World 4. `tools/mario_levels.py` jumps to every
   level by memory edits on the title screen; `tools/hash_sheet.py` makes the
   labelling sheets.
+- **Kirby's Dream Land:** the special preset (`docs/KIRBY_PLAN.md`). Green
+  Greens' first area so far: a banded morning sky with a parallax backdrop
+  drawn by code, white clouds, green-filled domes and hoops, clean foliage, and
+  a pink status bar with yellow health. Its line art (white shapes outlined on
+  a white sky) is sorted map-wide into open sky, cloud bodies and hills.
+  `tools/kirby_run.py` records states by flying through the level.
 - **Balloon Kid:** generic only, as the no-preset test. For plain Game Boy
   games, generic mode also gives volume to compact shapes on the lightest colour
   (trees, bushes, hills) and lights large terrain from above with depth. Press G

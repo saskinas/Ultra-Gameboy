@@ -1,8 +1,8 @@
 """Presets by cartridge title. Games without one use the generic preset."""
-from ugb.presets import generic, mario_land, pokemon_yellow, zelda_ladx
+from ugb.presets import generic, kirby_dream_land, mario_land, pokemon_yellow, zelda_ladx
 
 BY_TITLE = {pokemon_yellow.TITLE: pokemon_yellow, zelda_ladx.TITLE: zelda_ladx,
-            mario_land.TITLE: mario_land}
+            mario_land.TITLE: mario_land, kirby_dream_land.TITLE: kirby_dream_land}
 
 
 def for_title(title):

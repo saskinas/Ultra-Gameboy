@@ -43,6 +43,9 @@ def step(n, btn=None):
         if fr % int(os.environ.get("SEAM_EVERY", "8")) == 0:
             fresh = Enhancer(preset)
             fresh.frame_no = live.frame_no - 1
+            # same parallax camera (it follows the scroll history, not this frame)
+            fresh._bd_key, fresh._bd_layers = live._bd_key, live._bd_layers
+            fresh._bd_cam, fresh._bd_scroll = live._bd_cam.copy(), live._bd_scroll
             ref = fresh.render(f)
             d = np.abs(out.astype(int) - ref.astype(int)).max(-1) > 24
             # animated tiles can legitimately differ by shimmer phase

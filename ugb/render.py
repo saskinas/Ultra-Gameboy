@@ -10,9 +10,12 @@ Work happens in two spaces:
     sprites (lit, with soft shadows) and SNES-style text boxes.
 """
 import hashlib
+import os
 
 import numpy as np
 from scipy import ndimage as ndi
+from scipy import sparse as sp
+from scipy.sparse import csgraph
 
 from ugb import fx
 
@@ -37,6 +40,7 @@ IS_BUILDING = _set_lut(BUILDING)
 IS_ANIM = _set_lut(ANIM)
 IS_GL = _set_lut('gl')
 MARGIN = 3   # tiles of context around a redrawn band (stamps, shadows, shore)
+SKY_REGION = 2500   # line art: white regions bigger than this (pixels) are open sky
 SETTLE_FRAMES = 12   # still frames before the on-screen area is redrawn from scratch
 
 WATER_T = np.array([0.80, 0.42, 0.30, 0.10], np.float32)
@@ -406,6 +410,8 @@ class LayerState:
         self.flip_key = None       # graphics of the tiles that animate in place, right now
         self.bar = np.zeros((32, 32), bool)        # status-bar tiles seen in this map
         self.hud = np.zeros((32, 32), bool)        # of those, blank and two-colour (text) tiles
+        self.icon = np.zeros((32, 32), bool)       # of those, the preset's HUD icons
+        self.kind = None           # line-art regions per pixel (presets with LINE_ART)
         self.book = {}             # flipbook: those graphics -> (layer arrays, valid tiles)
         self.anim = np.zeros((N, N), np.int8)      # 0 none, 1 water, 2 flower bloom/bed
         self.extra = np.zeros((N, N), np.float32)  # material-specific tone offset
@@ -429,7 +435,14 @@ class Enhancer:
         self._anim_keys = set()  # tile keys seen animating in place
         self._flip_count = {}    # VRAM tile -> times its graphics changed in place
         self._hud_cache = None   # last status bar: (its input, the styled result)
+        self._kind = None        # line-art regions of the layer being drawn
         self.frame_no = 0
+        # parallax backdrop (presets with make_backdrop): layers, camera, this frame's picture
+        self._bd_key = None
+        self._bd_layers = None
+        self._bd_cam = np.zeros(2)
+        self._bd_scroll = None
+        self._bd_screen = None
         self._tileset = None
         self._last_cols = {}
         self._layers = {0: LayerState(), 1: LayerState()}
@@ -505,7 +518,7 @@ class Enhancer:
         # Status bar (score, time, lives): blank and two-colour tiles there are text.
         # They are stored as they are, like text boxes, and styled on screen, so a
         # ticking counter redraws only itself instead of a ring of tiles around it.
-        hud_before = st.hud.copy()
+        hud_before = st.hud | st.icon
         bar_before = st.bar.copy()
         if fresh:
             st.bar[:] = False
@@ -516,9 +529,9 @@ class Enhancer:
                 and (raw[brows] == st.raw[brows]).all()
                 and (idx.reshape(32, 8, 256)[brows] == st.idx.reshape(32, 8, 256)[brows]).all())
         if same:
-            if st.hud.any():
+            if st.hud.any() or st.icon.any():
                 tmat = tmat.copy()
-                tmat[st.hud] = M['U']
+                tmat[st.hud | st.icon] = M['U']
         elif len(brows):
             sub = idx.reshape(32, 8, 256)[brows].astype(np.int32)
             bits = np.left_shift(1, sub).reshape(len(brows), 8, 32, 8)
@@ -526,11 +539,17 @@ class Enhancer:
             ncol = (used & 1) + (used >> 1 & 1) + (used >> 2 & 1) + (used >> 3 & 1)
             st.hud[:] = False
             st.hud[brows] = st.bar[brows] & (tmat[brows] == M['?']) & (ncol <= 2)
-            if st.hud.any():
+            if st.hud.any():   # blank tiles that look like sky are part of a text bar too
+                st.hud[brows] |= st.bar[brows] & (tmat[brows] == M['Y']) & (ncol <= 2)
+            icons = list(getattr(self.p, 'HUD_STYLE', {}).get('icons', {}))
+            st.icon = st.bar & np.isin(raw, icons) if icons else np.zeros((32, 32), bool)
+            st.hud &= ~st.icon
+            if st.hud.any() or st.icon.any():
                 tmat = tmat.copy()
-                tmat[st.hud] = M['U']
+                tmat[st.hud | st.icon] = M['U']
         else:
             st.hud[:] = False
+            st.icon[:] = False
         if fresh:
             # new map, palette or tileset: everything is stale, draw what is on screen
             st.stale = np.ones((32, 32), bool)
@@ -541,7 +560,7 @@ class Enhancer:
         ui_tile = tmat == M['U']
         px_changed = (idx != st.idx).reshape(32, 8, 32, 8).any(axis=(1, 3))
         changed = (raw != st.raw) | (attrs != st.attrs) | (px_changed & ~IS_ANIM[tmat])
-        changed |= st.hud != hud_before        # tiles joining or leaving the status bar
+        changed |= (st.hud | st.icon) != hud_before   # tiles joining or leaving the status bar
         # tiles whose graphics change in place are animated (water, flowers...)
         anim_now = px_changed & (raw == st.raw) & (not fresh)
         tid = (bank.astype(np.int32) << 9) | ids
@@ -623,6 +642,17 @@ class Enhancer:
             if st.idle >= SETTLE_FRAMES and not st.settled:
                 st.stale |= vis & st.drawn
                 st.settled = settling = True
+        # Line art (white shapes drawn with outlines on a white sky): which white
+        # regions are open sky, cloud bodies or hills is a property of the whole
+        # map. When it changes (a shape finishes loading), redraw where it changed.
+        self._kind = None
+        if getattr(self.p, 'LINE_ART', False):
+            if grow.any() or fresh or st.kind is None:
+                kind = self._line_regions(f, idx, tmat)
+                if st.kind is not None and not fresh:
+                    st.stale |= (kind != st.kind).reshape(32, 8, 32, 8).any(axis=(1, 3))
+                st.kind = kind
+            self._kind = st.kind
         need = st.stale & vis
         if need.any():
             for r0, rl, c0, cl in self._bands(need):
@@ -638,6 +668,79 @@ class Enhancer:
             st.drawn[:] = False
         st.key, st.raw, st.attrs, st.idx = key, raw.copy(), attrs.copy(), idx.copy()
         return st, idx, prio, raw
+
+    @staticmethod
+    def _line_regions(f, idx, tmat):
+        """Per pixel of the 256x256 map: 0 not white, 1 open sky, 2 cloud body, 3 hill.
+
+        White pixels are joined into regions (4-connected, wrapping like the map),
+        with every other colour as a wall. Big regions reaching the top of the
+        screen are open sky; others are cloud bodies or hills, by which kind of tile ('Z' or 'h') holds more
+        of their pixels."""
+        shade = np.array([(f.bgp >> (2 * i)) & 3 for i in range(4)])[idx] if f.dmg else idx
+        tm = np.repeat(np.repeat(tmat, 8, 0), 8, 1)
+        # grass along the ground closes off shapes standing on it (hills, domes)
+        white = (shade == 0) & (tm != M['U']) & (tm != M['G'])
+        lab, n = ndi.label(white)
+        if n == 0:
+            return np.zeros((N, N), np.uint8)
+        # join regions that meet across the left/right edge (levels scroll
+        # sideways through the map; the rows below a short level are unused)
+        a = lab[:, 0]
+        b = lab[:, -1]
+        k = (a > 0) & (b > 0)
+        g = sp.coo_matrix((np.ones(k.sum()), (a[k], b[k])), shape=(n + 1, n + 1))
+        _, comp = csgraph.connected_components(g, directed=False)
+        lab = comp[lab]
+        lab[~white] = -1
+        m = comp.max() + 1
+        flat = lab[white]
+        size = np.bincount(flat, minlength=m)
+        cz = np.bincount(lab[white & (tm == M['Z'])], minlength=m)
+        chh = np.bincount(lab[white & (tm == M['h'])], minlength=m)
+        kind = np.where(cz >= chh, 2, 3).astype(np.uint8)
+        kind[(cz == 0) & (chh == 0)] = 0
+        # Open sky is split by hills and arches, but every piece reaches the top of
+        # the screen; the inside of a big hill doesn't.
+        top = np.zeros(m, bool)
+        sy = int(np.bincount(f.scy).argmax())
+        t = lab[sy % N]
+        top[t[t >= 0]] = True
+        kind[(size > SKY_REGION) & top] = 1
+        out = np.zeros((N, N), np.uint8)
+        out[white] = kind[flat]
+        # Hills are drawn with a dark outer line and a light inner band facing
+        # their inside. Open sky whose nearest solid pixel above, to the left or
+        # to the right is such a band, with the line right behind it, is inside a hill: this fills domes that are
+        # open at the bottom or cut off by the edge of the level. (Under a cloud
+        # the nearest solid pixel is its dark lower line, so that stays sky.)
+        band = (tm == M['h']) & (shade == 1)
+        line = shade >= 2
+        def behind(dy, dx):   # band pixels with the dark line just behind them (1-2 px)
+            return band & (np.roll(line, (dy, dx), (0, 1)) | np.roll(line, (2 * dy, 2 * dx), (0, 1)))
+        band_u, band_l, band_r = behind(1, 0), behind(0, 1), behind(0, -1)
+        solid = ~white
+        rows = np.arange(N)[:, None]
+        cols = np.arange(N)[None, :]
+        up = np.maximum.accumulate(np.where(solid, rows, -1), axis=0)
+        # sideways the map wraps: search a strip three maps wide, keep the middle
+        s3 = np.concatenate([solid] * 3, 1)
+        c3 = np.arange(3 * N)[None, :]
+        left = np.maximum.accumulate(np.where(s3, c3, -1), axis=1)[:, N:2 * N]
+        right = np.minimum.accumulate(np.where(s3, c3, 3 * N)[:, ::-1], axis=1)[:, ::-1][:, N:2 * N]
+        hm = (tm == M['h']) | (tm == M['E'])     # (tall hills share edge tiles with cliffs)
+        lx, rx = left % N, right % N
+        # sideways only between two outlines, not too far apart
+        between = (left >= 0) & (right < 3 * N) & hm[rows, lx] & hm[rows, rx] & (right - left < 96)
+        inside = ((up >= 0) & band_u[np.maximum(up, 0), cols])             | (between & (band_l[rows, lx] | band_r[rows, rx]))
+        out[(out == 1) & inside] = 3
+        # grass standing on the ground: the white around its blades is sky
+        wg = (shade == 0) & (tm == M['G'])
+        if wg.any():
+            lab2, _ = ndi.label(white | wg)
+            skyl = np.unique(lab2[out == 1])
+            out[wg & np.isin(lab2, skyl[skyl > 0])] = 1
+        return out
 
     @staticmethod
     def _bands(need):
@@ -701,6 +804,9 @@ class Enhancer:
             ph = self.frame_no * 0.12
             wave = np.sin(0.55 * yy + 0.21 * xx - ph) + 0.6 * np.sin(0.23 * yy - 0.37 * xx + 0.7 * ph)
             rgb[w3] = rgb[w3] * (1 + 0.045 * wave)[:, None]
+        w4 = a == 4
+        if w4.any() and self._bd_screen is not None:   # parallax backdrop behind open sky
+            rgb[w4] = self._bd_screen[w4]
         fl = a == 2
         if fl.any():
             yy, xx = ys[fl], xs[fl]
@@ -829,7 +935,7 @@ class Enhancer:
         # outline are sky too. Kept local, like the building fill.
         sky0 = mat == M['Y']
         if sky0.any():
-            free = ~sky0 & (idx == 0) & ~obj
+            free = ~sky0 & (idx == 0) & ~obj & (mat != M['U'])   # text boxes stay as they are
             reach = _grow4(fx.dilate(sky0, wrap) & free, free, 24, wrap)
             mat[reach] = M['Y']
 
@@ -854,7 +960,29 @@ class Enhancer:
             anim[m] = 2
             extra[m] = lawn_t[m]
         m = mat == M['G']
-        if m.any():
+        if m.any() and getattr(p, 'CLEAN_GRASS', False):
+            # clean foliage: white shapes are leaves (lit along their top), lone
+            # white dots and the colour behind them are one smooth backdrop, ink
+            # is a dark outline; no texture noise
+            white = idx == 0
+            near = (fx.shift(white, 1, 0, False, wrap) | fx.shift(white, -1, 0, False, wrap)
+                    | fx.shift(white, 0, 1, False, wrap) | fx.shift(white, 0, -1, False, wrap))
+            leaf = white & near
+            stroke = idx >= 2
+            # behind the leaves: exactly the ground body ('E'), so the band joins it
+            back = m & ~leaf & ~stroke
+            if self._kind is not None:   # white that is open sky (above the ground)
+                skyp = self._kind[np.ix_(ys, xs)] == 1
+                leaf &= ~skyp
+                back &= ~skyp
+            out[back] = fx.pick(R['earth'], ch([0.8, 0.6, 0.42, 0.12]) + 0.14 * (ng - 0.5))[back]
+            top = leaf & ~fx.shift(leaf, 1, 0, False, wrap)
+            bottom = leaf & ~fx.shift(leaf, -1, 0, False, wrap)
+            t = np.where(top, 0.98, np.where(bottom, 0.68, 0.84))
+            t = np.where(leaf, t, np.where(idx == 3, 0.02, 0.18))
+            fg = m & (leaf | stroke)
+            out[fg] = fx.pick(R['tallgrass'], t)[fg]
+        elif m.any():
             t = ch([0.06, 0.82, 0.52, 0.0]) - 0.07 * ((YY % 8) - 3.5) / 3.5 + 0.10 * (nm - 0.5)
             out[m] = fx.pick(R['tallgrass'], t)[m]
         m = mat == M['W']
@@ -906,18 +1034,45 @@ class Enhancer:
             # outline hills: anything below a hill's outline in its column is inside it
             under = np.maximum.accumulate(hill_line, axis=0) & ~hill_line
             inside = under & (sky | (mat == M['h']))
+            if self._kind is not None:
+                inside[:] = False       # line art: regions decide (below)
             t = 1.0 - np.clip((YY - 8) / 136.0, 0, 1) * 0.85 + 0.04 * (nb - 0.5)
             m = sky & ~inside
             out[m] = fx.pick(R['sky'], 1 - t, bay, 0.9)[m]
+            if hasattr(p, 'make_backdrop'):
+                anim[m] = 4          # open sky shows the parallax backdrop
             if inside.any():
                 th_ = 0.75 - 0.35 * np.clip((YY % 144) / 144.0, 0, 1) + 0.1 * (nb - 0.5)
                 out[inside] = fx.pick(R['hill'], th_, bay, 0.6)[inside]
             out[hill_line] = fx.pick(R['hill'], np.full((H, W), 0.12, np.float32))[hill_line]
             rest = (mat == M['h']) & ~hill_line & ~inside
             out[rest] = fx.pick(R['sky'], 1 - t, bay, 0.9)[rest]
+            if hasattr(p, 'make_backdrop'):
+                anim[rest] = 4
         m = mat == M['Z']
         if m.any():   # clouds: soft white to blue by shade
             out[m] = fx.pick(R['cloud'], ch([0.98, 0.72, 0.45, 0.18]))[m]
+        if self._kind is not None:
+            kd = self._kind[np.ix_(ys, xs)]
+            t_sky = 1.0 - np.clip((YY - 8) / 136.0, 0, 1) * 0.85 + 0.04 * (nb - 0.5)
+            m = kd == 1
+            if m.any():   # open sky (behind the backdrop, if any)
+                out[m] = fx.pick(R['sky'], 1 - t_sky, bay, 0.9)[m]
+                if hasattr(p, 'make_backdrop'):
+                    anim[m] = 4
+            m = kd == 2
+            if m.any():   # cloud bodies: white, a little cooler toward the bottom of each tile row
+                out[m] = fx.pick(R['cloud'], 0.97 - 0.05 * ((YY % 16) > 11) + 0.03 * (nb - 0.5))[m]
+                anim[m] = 0
+            m = (mat == M['h']) & (idx >= 1)
+            if m.any():   # the body of hills and hoops: the hill ramp by shade, edges darker
+                out[m] = fx.pick(R['hill'], ch([0.9, 0.62, 0.38, 0.1]) + 0.06 * (nb - 0.5))[m]
+                anim[m] = 0
+            m = kd == 3
+            if m.any():   # hills: soft green, lighter near the top
+                th_ = 0.75 - 0.35 * np.clip((YY % 144) / 144.0, 0, 1) + 0.1 * (nb - 0.5)
+                out[m] = fx.pick(R['hill'], th_, bay, 0.6)[m]
+                anim[m] = 0
         if txt_ink.any():   # bold cream letters, lit from the top, with a dark drop shadow
             shadow = (fx.shift(txt_ink, 1, 1, False, wrap) | fx.shift(txt_ink, 0, 1, False, wrap)) & ~txt_ink
             out[shadow] = out[shadow] * 0.25 + np.array([10, 14, 40], np.float32) * 0.75
@@ -1134,6 +1289,8 @@ class Enhancer:
                     for t, h in anchors):
                 table = None      # not really this tileset on screen (title, intro...)
         by, bx, wy, wx = np.broadcast_arrays(*f.screen_coords())
+        if hasattr(self.p, 'make_backdrop'):
+            self._backdrop(f)
         # tiles on screen plus one tile of slack, so scrolling never shows a stale tile
         # by depends only on the line and bx only on the line's SCX, so small sets do
         rows = np.unique(by[:, 0] // 8)
@@ -1154,8 +1311,9 @@ class Enhancer:
         if bst.bar.any():
             hud = bst.hud[by // 8, bx // 8]
             hbar = bst.bar[by // 8, bx // 8]
+            hico = bst.icon[by // 8, bx // 8]
         else:
-            hud = hbar = np.zeros((144, 160), bool)
+            hud = hbar = hico = np.zeros((144, 160), bool)
         if win.any():
             wvis = np.zeros((32, 32), bool)
             wvis[np.ix_(np.unique(wy // 8), np.unique(wx // 8))] = True
@@ -1163,6 +1321,8 @@ class Enhancer:
             on, _ = f._window_lines()
             y0 = int(np.argmax(on))
             woff = (int(y0 + f.scy[y0]) % N, int(f.wx[y0] - 7 + f.scx[y0]) % N)
+            if wbar is not None:
+                woff = (0, 0)     # a status bar doesn't sit over the map: keep it still
             wst, widx, wprio, wraw = self.layer(f, f.win_map(), table, wvis, woff, bar=wbar)
             wrgb = wst.out[wy, wx]
             wsidx = widx[wy, wx]
@@ -1175,10 +1335,57 @@ class Enhancer:
             if wst.bar.any():
                 hud = np.where(win, wst.hud[wy // 8, wx // 8], hud)
                 hbar = np.where(win, wst.bar[wy // 8, wx // 8], hbar)
-        self._hud_text(rgb, hud, hbar)
+                hico = np.where(win, wst.icon[wy // 8, wx // 8], hico)
+        shade = np.array([(f.bgp >> (2 * i)) & 3 for i in range(4)])[sidx] if f.dmg else sidx
+        self._hud_text(rgb, hud, hbar, hico, shade, stid)
         self._sprites(f, rgb, sidx, sprio, ui, overworld=table is not None)
         self._textbox(rgb, sidx, stid, ui)
         return fx.snes15(rgb)
+
+    def _backdrop(self, f):
+        """Compose this frame's parallax backdrop (screen-sized) from the preset's layers.
+
+        The preset builds its layers once per key (stage): a list of (image, kx, ky),
+        each an (h, w, 4) float array with alpha, scrolled at kx, ky times the camera.
+        The camera follows the playfield's scroll, unwrapped across the 256-pixel map."""
+        key = self.p.backdrop_key(f)
+        if key != self._bd_key:
+            self._bd_key = key
+            self._bd_layers = self.p.make_backdrop(key) if key is not None else None
+            self._bd_cam[:] = 0
+            self._bd_scroll = None
+            self._bd_offs = None
+        if self._bd_layers is None:
+            self._bd_screen = None
+            return
+        sx = int(np.bincount(f.scx).argmax())
+        sy = int(np.bincount(f.scy).argmax())
+        if self._bd_scroll is not None:
+            dx = (sx - self._bd_scroll[0] + 128) % 256 - 128
+            dy = (sy - self._bd_scroll[1] + 128) % 256 - 128
+            self._bd_cam += (dx, dy)
+        self._bd_scroll = (sx, sy)
+        offs = tuple((int(round(self._bd_cam[0] * kx)), int(round(self._bd_cam[1] * ky)))
+                     for _, kx, ky in self._bd_layers)
+        if offs == getattr(self, '_bd_offs', None):
+            return                       # no layer moved by a whole pixel: reuse
+        self._bd_offs = offs
+        out = None
+        for (img, kx, ky), (ox, oy) in zip(self._bd_layers, offs):
+            h, w = img.shape[:2]
+            y0 = int(np.clip(oy, 0, h - 144))
+            x0 = ox % w
+            rows = img[y0:y0 + 144]
+            if x0 + 160 <= w:
+                px = rows[:, x0:x0 + 160]
+            else:
+                px = np.concatenate([rows[:, x0:], rows[:, :x0 + 160 - w]], 1)
+            if out is None:
+                out = px[..., :3].copy()
+            else:
+                a = px[..., 3:4]
+                out = out * (1 - a) + px[..., :3] * a
+        self._bd_screen = out
 
     @staticmethod
     def _status_bar(f, by, bx):
@@ -1209,7 +1416,7 @@ class Enhancer:
             bbar[by[band] // 8, bx[band] // 8] = True
         return bbar, wbar
 
-    def _hud_text(self, rgb, hud, bar):
+    def _hud_text(self, rgb, hud, bar, icon, shade, stid):
         """SNES-style status bar: a dark gradient panel, cream text with a shadow.
 
         `hud` marks blank and two-colour tiles in the bar (text); their darker
@@ -1220,9 +1427,11 @@ class Enhancer:
             return
         r0, r1 = rows[0], rows[-1] + 1        # work on the bar's lines only
         full, rgb, hud, bar = rgb, rgb[r0:r1], hud[r0:r1], bar[r0:r1]
+        icon, shade, stid = icon[r0:r1], shade[r0:r1], stid[r0:r1]
         if not hud.any():
             return
-        ck = (r0, rgb.tobytes(), np.packbits(hud).tobytes(), np.packbits(bar).tobytes())
+        ck = (r0, rgb.tobytes(), np.packbits(hud).tobytes(), np.packbits(bar).tobytes(),
+              np.packbits(icon).tobytes())
         hit = self._hud_cache
         if hit is not None and hit[0] == ck:      # the bar hasn't changed: reuse it
             full[r0:r1] = hit[1]
@@ -1233,20 +1442,26 @@ class Enhancer:
             return                      # nothing but blank tiles
         ink = hud & (lum < (lo + hi) / 2)
         paper = bar & (lum >= hi - 24) & ~ink
+        style = getattr(self.p, 'HUD_STYLE', {})
+        paper |= icon & (shade == 0)
         # the panel: paper reachable from the text tiles without crossing a line
-        panel = paper & hud
-        for _ in range(10):
-            g = panel | fx.shift(panel, 1, 0) | fx.shift(panel, -1, 0) | fx.shift(panel, 0, 1) | fx.shift(panel, 0, -1)
-            g &= paper
-            if (g == panel).all():
-                break
-            panel = g
-        steps = fx.hx('#3a56c8', '#3048b8', '#283ca4', '#203090', '#1a267c', '#141e68')
+        panel = _grow4(paper & hud, paper, 64, False)
+        steps = fx.hx(*style.get('panel', ('#3a56c8', '#3048b8', '#283ca4', '#203090', '#1a267c', '#141e68')))
         k = np.clip((SY[r0:r1] - r0) * len(steps) // max(r1 - r0, 1), 0, len(steps) - 1)
         rgb[panel] = steps[k][panel]
+        if 'edge' in style:      # a line along the panel's top edge
+            top_row = panel & (SY[r0:r1] == r0)
+            rgb[top_row] = fx.hx(style['edge'])[0]
         shadow = (fx.shift(ink, 1, 1) | fx.shift(ink, 0, 1)) & panel
-        rgb[shadow] = fx.hx('#060c38')[0]
-        text = fx.hx('#fff4d0', '#f4e0a8', '#d8b878')
+        rgb[shadow] = fx.hx(style.get('shadow', '#060c38'))[0]
+        for tile, ramp in style.get('icons', {}).items():   # icons: their own ramps by shade
+            m = icon & (stid == tile) & ((shade > 0) | ~panel)      # incl. their enclosed white
+            if m.any():
+                t = np.choose(shade, [0.64, 0.72, 0.42, 0.06])   # white inside an icon: its body colour
+                top_px = m & ~fx.shift(m, 1, 0)
+                t = np.where(top_px & (shade < 3), t + 0.12, t)
+                rgb[m] = fx.pick(self.p.RAMPS[ramp], t)[m]
+        text = fx.hx(*style.get('text', ('#fff4d0', '#f4e0a8', '#d8b878')))
         top = ink & ~fx.shift(ink, 1, 0)
         tone = np.where(top, 0, np.where(fx.shift(ink, -1, 0), 1, 2))
         rgb[ink] = text[tone][ink]
@@ -1299,6 +1514,22 @@ class Enhancer:
         groups = {}
         for s in f.sprites():
             groups.setdefault(s['i'] // 4, []).append(s)
+        # Games reuse OAM groups for unrelated objects far apart; shading one box
+        # around them all is slow and never cached. Split groups into pieces whose
+        # sprites touch (a group that is one object, as in Pokemon, stays whole).
+        split = {}
+        for g, ss in groups.items():
+            parts = []
+            for s in ss:
+                hs = s['px'].shape[0]
+                hit = [q for q in parts if any(s['x'] <= t['x'] + 8 and t['x'] <= s['x'] + 8
+                                               and s['y'] <= t['y'] + t['px'].shape[0]
+                                               and t['y'] <= s['y'] + hs for t in q)]
+                merged = [s] + [t for q in hit for t in q]
+                parts = [q for q in parts if not any(q is h for h in hit)] + [merged]
+            for k, q in enumerate(parts):
+                split[g + k / 8] = q
+        groups = split
         bg_on = f.lcdc & 1
         for g in sorted(groups, reverse=True):   # lower OAM groups end on top
             ss = groups[g]
