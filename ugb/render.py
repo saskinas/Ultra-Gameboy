@@ -664,8 +664,10 @@ class Enhancer:
                     S = np.ix_(py, px_)
                     patch = idx[S]
                     msk = self._stamp_mask(patch)
+                    # the ground around an object comes from the tile below it, but
+                    # only real floor (not tall grass or flowers growing on it)
                     under = tmat[(r + h) % th, c]
-                    under = under if chr(under) in 'glfG' else M['g']
+                    under = under if chr(under) in 'glFEC' else M['g']
                     sub = mat[S]
                     sub[~msk] = under
                     mat[S] = sub

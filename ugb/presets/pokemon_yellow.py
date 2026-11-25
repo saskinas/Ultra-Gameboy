@@ -134,6 +134,8 @@ _CAVERN = _table(
 
 for t in (0x34, 0x36, 0x37):      # ledges you jump down (Route 1 and others)
     _OVERWORLD[t] = 'L'
+_OVERWORLD[0x1E] = 'K'            # cliff corner (Routes 2, 3, 9), not a roof
+_OVERWORLD[0x01] = 'l'            # grassy edge of plateaus and map borders
 
 TILESETS = {0: _OVERWORLD, 1: _REDS_HOUSE, 4: _REDS_HOUSE, 8: _HOUSE, 2: _CENTER, 6: _CENTER,
             9: _GATE, 10: _GATE, 12: _GATE, 17: _CAVERN, 3: None}
