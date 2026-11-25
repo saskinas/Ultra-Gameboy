@@ -35,6 +35,7 @@ RAMPS = {
     'water': hx('#0c2060', '#163496', '#2050c0', '#3074dc', '#5498ec', '#8cc4f8', '#d0ecff'),
     'wall': hx('#4a3020', '#7a5636', '#a67e52', '#ccaa74', '#e8cc98', '#f8e8c0'),
     'dirt2': hx('#2a1810', '#4a2e1a', '#6c4626', '#8e6234', '#ae8048'),
+    'text': hx('#8a6a3a', '#d8b878', '#f4e0a8', '#fff4d0', '#ffffff'),
     'neutral': hx('#202028', '#505060', '#8a8a98', '#c8c8d0', '#f4f4f8'),
 }
 SPRITE_SLOT = {}
@@ -105,3 +106,14 @@ _add('Z', 'fd4e99', 'd3b67b', 'b14dd3', '468250', 'a6201f', '18a7a7', '5149e8', 
      'adfbc5', 'fede58', '973acb')
 _add('L', 'b98b53', '90526a', '52131c', 'e8c76b', '86b0ca', 'a3da36', 'c12da3', '960bb9')
 _add('V', 'a8de6d', '99f936', '75b65d', '7754ee')
+
+# Status bar and other text: the font (digits 0-9, letters A-Z, '-' and 'x') is the
+# same in every world. Drawn as bold cream letters with a drop shadow over the sky.
+_FONT = ('7e6321', 'a68d02', 'cd81af', '1839f6', 'e354ec', 'eddce0', '4abc77', 'dd2817',
+         '1eb164', '7d1fbf', '2e3535', 'd810f1', 'da34ff', 'ab5293', 'e71edc', 'e410ae',
+         '250e59', '6e69f9', 'd8a689', '1022f0', '97b72b', '9e795c', '4a005c', 'a5ea36',
+         'cd1142', '0b2ea5', '50fa0b', '3f98c4', 'c96488', '1d92cf', '4f5f8e', '990519',
+         '5da3a7', 'bdb8ab', 'd962e2', '6e59b6', '0ea233')
+_clash = [h for h in _FONT if int(h, 16) in TILE_KEYS]
+assert not _clash, _clash
+_add('X', *_FONT)

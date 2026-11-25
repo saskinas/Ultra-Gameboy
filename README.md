@@ -76,6 +76,11 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
     Shapes enclosed by near-black outlines get soft volume lit from the top left,
     with warm highlights and cool shadows. Inner outlines take a dark tint of
     their neighbours. Sprites get the same treatment from their own palettes.
+  - **Status bars, any game:** a band of up to 40 lines at the top or bottom
+    that doesn't scroll with the level (a full-width window, or BG lines with
+    their own scroll) is a status bar. Its text tiles get a SNES-style panel
+    with cream lettering and a drop shadow, and a ticking counter redraws only
+    its own tiles.
   - **Ramp presets (Pokémon Yellow):** tile number → material (ground, lawn,
     tall grass, water, tree, roof, wall, window…) painted with chosen colour
     ramps, lit objects, shadows, animated water and flowers, sprites coloured
@@ -109,6 +114,8 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
   games, generic mode also gives volume to compact shapes on the lightest colour
   (trees, bushes, hills) and lights large terrain from above with depth. Press G
   for the stronger setting.
+- Tiles whose graphics cycle in place (flashing blocks, waterfalls) are kept as
+  a flipbook, one finished drawing per animation frame.
 - 60 fps with about 10–15 ms per frame. Link's Awakening's room-to-room scroll
   spikes to about 45 ms (a few dropped frames, no audio gaps).
 

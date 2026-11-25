@@ -22,7 +22,7 @@ L = np.array([-1.0, -1.0, 1.0], np.float32) / np.sqrt(3)   # light from the top 
 GROUND = ['g', 'l', 'f', 'G', 'F', 'C', 'E']        # receive shadows
 BUILDING = ['R', 'H', 'N', 'D', 'S', 'O', 'M', 'L']   # cast shadows
 ANIM = ['W', 'f']
-M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOELUYhVQZA?'}   # material codes as bytes (fast compares)
+M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOELUYhVQZAX?'}   # material codes as bytes (fast compares)
 
 
 def _set_lut(chars):
@@ -373,6 +373,23 @@ def generic_shade(rgb, wrap, solid=None, tex=None, strength=0.5, dmg=False, leve
     return (out, water) if want_water else out
 
 
+_CROSS = ndi.generate_binary_structure(2, 1)
+
+
+def _grow4(seed, free, steps, wrap):
+    """Grow `seed` through `free` pixels by up to `steps` 4-connected steps."""
+    if not wrap:
+        return ndi.binary_dilation(seed, _CROSS, iterations=steps, mask=free) | seed
+    reach = seed
+    for _ in range(steps):
+        n = reach | ((fx.shift(reach, 1, 0, False, True) | fx.shift(reach, -1, 0, False, True)
+                      | fx.shift(reach, 0, 1, False, True) | fx.shift(reach, 0, -1, False, True)) & free)
+        if (n == reach).all():
+            break
+        reach = n
+    return reach
+
+
 class LayerState:
     """Everything kept for one BG map between frames."""
 
@@ -385,6 +402,11 @@ class LayerState:
         self.stale = np.zeros((32, 32), bool)
         self.idle = 0              # frames since the map last changed
         self.settled = False       # whether the settle pass has run since
+        self.drawn = np.zeros((32, 32), bool)      # tiles drawn since the last settle pass
+        self.flip_key = None       # graphics of the tiles that animate in place, right now
+        self.bar = np.zeros((32, 32), bool)        # status-bar tiles seen in this map
+        self.hud = np.zeros((32, 32), bool)        # of those, blank and two-colour (text) tiles
+        self.book = {}             # flipbook: those graphics -> (layer arrays, valid tiles)
         self.anim = np.zeros((N, N), np.int8)      # 0 none, 1 water, 2 flower bloom/bed
         self.extra = np.zeros((N, N), np.float32)  # material-specific tone offset
         self.over = np.full((N, N), np.nan, np.float32)  # fixed tone (foam)
@@ -405,6 +427,8 @@ class Enhancer:
         self._mat_cache = {}
         self.generic_level = 1   # 1 subtle, 2 strong (generic shading only)
         self._anim_keys = set()  # tile keys seen animating in place
+        self._flip_count = {}    # VRAM tile -> times its graphics changed in place
+        self._hud_cache = None   # last status bar: (its input, the styled result)
         self.frame_no = 0
         self._tileset = None
         self._last_cols = {}
@@ -464,7 +488,7 @@ class Enhancer:
         return raw.astype(np.int64), lut[raw]
 
     # ------------------------------------------------------------------ BG layer
-    def layer(self, f, which, table, vis, off=(0, 0)):
+    def layer(self, f, which, table, vis, off=(0, 0), bar=None):
         """Bring the stored layer up to date. `vis` is the 32x32 mask of tiles on screen (plus a
         tile of slack); changes elsewhere are only marked stale and drawn once they scroll in."""
         st = self._layers[which]
@@ -478,6 +502,35 @@ class Enhancer:
         self._off = off
         st.off = off
         fresh = st.key != key or st.raw is None
+        # Status bar (score, time, lives): blank and two-colour tiles there are text.
+        # They are stored as they are, like text boxes, and styled on screen, so a
+        # ticking counter redraws only itself instead of a ring of tiles around it.
+        hud_before = st.hud.copy()
+        bar_before = st.bar.copy()
+        if fresh:
+            st.bar[:] = False
+        if bar is not None:
+            st.bar |= bar
+        brows = np.nonzero(st.bar.any(1))[0]              # only the bar's rows
+        same = (not fresh and st.idx is not None and (st.bar == bar_before).all()
+                and (raw[brows] == st.raw[brows]).all()
+                and (idx.reshape(32, 8, 256)[brows] == st.idx.reshape(32, 8, 256)[brows]).all())
+        if same:
+            if st.hud.any():
+                tmat = tmat.copy()
+                tmat[st.hud] = M['U']
+        elif len(brows):
+            sub = idx.reshape(32, 8, 256)[brows].astype(np.int32)
+            bits = np.left_shift(1, sub).reshape(len(brows), 8, 32, 8)
+            used = np.bitwise_or.reduce(np.bitwise_or.reduce(bits, axis=3), axis=1)
+            ncol = (used & 1) + (used >> 1 & 1) + (used >> 2 & 1) + (used >> 3 & 1)
+            st.hud[:] = False
+            st.hud[brows] = st.bar[brows] & (tmat[brows] == M['?']) & (ncol <= 2)
+            if st.hud.any():
+                tmat = tmat.copy()
+                tmat[st.hud] = M['U']
+        else:
+            st.hud[:] = False
         if fresh:
             # new map, palette or tileset: everything is stale, draw what is on screen
             st.stale = np.ones((32, 32), bool)
@@ -488,10 +541,45 @@ class Enhancer:
         ui_tile = tmat == M['U']
         px_changed = (idx != st.idx).reshape(32, 8, 32, 8).any(axis=(1, 3))
         changed = (raw != st.raw) | (attrs != st.attrs) | (px_changed & ~IS_ANIM[tmat])
+        changed |= st.hud != hud_before        # tiles joining or leaving the status bar
         # tiles whose graphics change in place are animated (water, flowers...)
-        anim_now = px_changed & (raw == st.raw) & ~fresh
+        anim_now = px_changed & (raw == st.raw) & (not fresh)
+        tid = (bank.astype(np.int32) << 9) | ids
         if anim_now.any():
             self._anim_keys.update(np.unique(tkeys[anim_now]).tolist())
+            for t in np.unique(tid[anim_now & ~IS_ANIM[tmat]]).tolist():
+                self._flip_count[t] = self._flip_count.get(t, 0) + 1
+        # Flipbook: tiles whose graphics keep changing in place (flashing blocks,
+        # coins, waterfalls) would redraw a ring around every copy each time. Keep
+        # one finished drawing per animation frame and swap it back in instead.
+        flip_hit = None
+        if fresh:
+            st.book.clear()
+            st.flip_key = None
+        else:
+            flip_ids = sorted(t for t, n in self._flip_count.items() if n >= 2)
+            if flip_ids:
+                skey = b''.join(f.tiles[t >> 9, t & 511].tobytes() for t in flip_ids)
+                if st.flip_key is not None and skey != st.flip_key:
+                    names = ('out', 'anim', 'extra', 'over', 'mul')
+                    cur = {n: getattr(st, n) for n in names}
+                    hit = st.book.pop(skey, None)
+                    if hit is not None:
+                        arrays, valid = hit
+                        st.book[st.flip_key] = (cur, ~st.stale)
+                        pm = np.repeat(np.repeat(ui_tile, 8, 0), 8, 1)
+                        for n in names:          # text boxes always stay current
+                            arrays[n][pm] = cur[n][pm]
+                            setattr(st, n, arrays[n])
+                        st.stale |= ~valid
+                        flip_hit = np.isin(tid, flip_ids)
+                    else:
+                        st.book[st.flip_key] = ({n: a.copy() for n, a in cur.items()}, ~st.stale)
+                    while len(st.book) > 6:
+                        st.book.pop(next(iter(st.book)))
+                st.flip_key = skey
+        if flip_hit is not None:
+            changed &= ~(flip_hit & anim_now)   # already drawn for these graphics
         # Text box tiles are styled in screen space: just store their raw colours.
         ui_new = changed & ui_tile
         if ui_new.any():
@@ -504,27 +592,37 @@ class Enhancer:
         # A changed tile also changes how its neighbours look: objects up to two
         # tiles tall take colour from the tile below them, shadows fall onto the
         # next row, shore foam reaches into the water. Redraw two tiles around it.
-        grow = changed & ~ui_tile
+        grow = changed & ~ui_tile & ~st.bar
+        bar_changed = changed & ~ui_tile & st.bar     # status-bar text: just the tile itself
         if grow.any() and not grow.all():
             # at least two tiles, more for this tileset's biggest object (4x4 trees)
             stamps = self.p.STAMPS.get(self._tileset, []) if isinstance(self.p.STAMPS, dict) else self.p.STAMPS
             rad = max([2] + [max(len(rows), len(rows[0])) for rows, _ in stamps])
             g = grow.copy()
-            for dy in range(-rad, rad + 1):          # the tile map wraps, so roll
-                for dx in range(-rad, rad + 1):
-                    g |= np.roll(grow, (dy, dx), (0, 1))
-            grow = g
+            for d in range(1, rad + 1):              # the tile map wraps, so roll
+                g |= np.roll(grow, d, 0) | np.roll(grow, -d, 0)
+            g2 = g.copy()
+            for d in range(1, rad + 1):
+                g2 |= np.roll(g, d, 1) | np.roll(g, -d, 1)
+            grow = g2
+        grow |= bar_changed
         st.stale |= grow
+        if grow.any():
+            for _, valid in st.book.values():   # stored frames there are out of date
+                valid &= ~grow
         # Settle pass: once nothing has changed for a moment, redraw what is on
         # screen from scratch. Anything drawn earlier from stale context (tiles the
         # game hadn't reloaded yet) is cleared, whatever game or effect caused it.
+        # Only tiles drawn since the last settle can hold such leftovers, so a
+        # scrolling game redraws its new columns, not the whole screen.
+        settling = False
         if grow.any() or fresh:
             st.idle, st.settled = 0, False
         else:
             st.idle += 1
             if st.idle >= SETTLE_FRAMES and not st.settled:
-                st.stale |= vis
-                st.settled = True
+                st.stale |= vis & st.drawn
+                st.settled = settling = True
         need = st.stale & vis
         if need.any():
             for r0, rl, c0, cl in self._bands(need):
@@ -532,9 +630,12 @@ class Enhancer:
                 rr = np.arange(r0 + (0 if rl == 32 else MARGIN), r0 + rl - (0 if rl == 32 else MARGIN)) % 32
                 cc = np.arange(c0 + (0 if cl == 32 else MARGIN), c0 + cl - (0 if cl == 32 else MARGIN)) % 32
                 st.stale[np.ix_(rr, cc)] = False
+                st.drawn[np.ix_(rr, cc)] = True
                 self.stats['band'] += 1
         else:
             self.stats['cached'] += 1
+        if settling:
+            st.drawn[:] = False
         st.key, st.raw, st.attrs, st.idx = key, raw.copy(), attrs.copy(), idx.copy()
         return st, idx, prio, raw
 
@@ -650,14 +751,8 @@ class Enhancer:
             # band of sky. It is lawn when connected to ground tiles, else sky.
             amb = tmat == M['A']
             grounded = IS_GROUND[tmat] | (tmat == M['L']) | (tmat == M['E'])
-            reach = np.zeros_like(amb)
-            for _ in range(th + tw):
-                grow = reach | grounded
-                n = amb & (fx.shift(grow, 1, 0, False, False) | fx.shift(grow, -1, 0, False, False)
-                           | fx.shift(grow, 0, 1, False, False) | fx.shift(grow, 0, -1, False, False))
-                if (n == reach).all():
-                    break
-                reach = n
+            lab, _ = ndi.label(amb | grounded)       # 4-connected
+            reach = amb & np.isin(lab, np.unique(lab[grounded]))
             tmat = tmat.copy()
             tmat[amb] = np.where(reach[amb], M['l'], M['Y'])
         idx_raw = idx                  # colour numbers, for the game's own palette
@@ -724,14 +819,7 @@ class Enhancer:
                     near_t |= fx.shift(g_t, dy, dx, False, wrap)
             near = np.repeat(np.repeat(near_t, 8, 0), 8, 1)
             free = bld & (idx == 0) & near
-            reach = fx.dilate(IS_GROUND[mat], wrap) & free
-            for _ in range(8):
-                n = fx.dilate(reach, wrap) & free
-                n = (reach | (n & (fx.shift(reach, 1, 0, False, wrap) | fx.shift(reach, -1, 0, False, wrap)
-                                   | fx.shift(reach, 0, 1, False, wrap) | fx.shift(reach, 0, -1, False, wrap))))
-                if (n == reach).all():
-                    break
-                reach = n
+            reach = _grow4(fx.dilate(IS_GROUND[mat], wrap) & free, free, 8, wrap)
             gcodes = mat[IS_GROUND[mat]]
             fill = np.bincount(gcodes, minlength=256).argmax() if gcodes.size else M['g']
             mat[reach] = fill
@@ -742,13 +830,7 @@ class Enhancer:
         sky0 = mat == M['Y']
         if sky0.any():
             free = ~sky0 & (idx == 0) & ~obj
-            reach = fx.dilate(sky0, wrap) & free
-            for _ in range(24):
-                n = reach | ((fx.shift(reach, 1, 0, False, wrap) | fx.shift(reach, -1, 0, False, wrap)
-                              | fx.shift(reach, 0, 1, False, wrap) | fx.shift(reach, 0, -1, False, wrap)) & free)
-                if (n == reach).all():
-                    break
-                reach = n
+            reach = _grow4(fx.dilate(sky0, wrap) & free, free, 24, wrap)
             mat[reach] = M['Y']
 
         out = np.zeros((H, W, 3), np.float32)
@@ -811,6 +893,12 @@ class Enhancer:
                     t = np.where(((XX + off_x + YY + off_y) % 7 < 2) & (idx != 3), t + 0.25, t)
                 out[m] = fx.pick(R[ramp], t)[m]
 
+        # status-bar text ('X'): the paper around the letters is sky; the letters
+        # themselves are painted solid with a drop shadow once the sky is down
+        txt = mat == M['X']
+        txt_ink = txt & (idx >= 2)
+        if txt.any():
+            mat[txt & ~txt_ink] = M['Y']
         # sky: a stepped vertical gradient, deeper at the top
         sky = mat == M['Y']
         hill_line = (mat == M['h']) & (idx >= 2)
@@ -830,6 +918,12 @@ class Enhancer:
         m = mat == M['Z']
         if m.any():   # clouds: soft white to blue by shade
             out[m] = fx.pick(R['cloud'], ch([0.98, 0.72, 0.45, 0.18]))[m]
+        if txt_ink.any():   # bold cream letters, lit from the top, with a dark drop shadow
+            shadow = (fx.shift(txt_ink, 1, 1, False, wrap) | fx.shift(txt_ink, 0, 1, False, wrap)) & ~txt_ink
+            out[shadow] = out[shadow] * 0.25 + np.array([10, 14, 40], np.float32) * 0.75
+            top = txt_ink & ~fx.shift(txt_ink, 1, 0, False, wrap)
+            tone = np.where(top, 1.0, 0.82 - 0.25 * ((YY % 8) / 8.0))
+            out[txt_ink] = fx.pick(R['text'], tone)[txt_ink]
 
         # ledges: a lit grassy lip, a short dirt face, a shadow below (cast later)
         m = mat == M['L']
@@ -895,31 +989,37 @@ class Enhancer:
                 out[m] = raw_rgb[m]
             else:
                 # run the generic pass only on the unlabelled area, plus a margin of
-                # context, in tile-aligned steps (the water test works on tiles)
-                ty, tx = np.nonzero(m.reshape(H // 8, 8, W // 8, 8).any(axis=(1, 3)))
-                r0, r1 = max(ty.min() - 2, 0) * 8, min(ty.max() + 3, H // 8) * 8
-                c0, c1 = max(tx.min() - 2, 0) * 8, min(tx.max() + 3, W // 8) * 8
-                whole = (r0, r1, c0, c1) == (0, H, 0, W)
-                Y, X = slice(r0, r1), slice(c0, c1)
-                tex = 0.6 * nb[Y, X] + 0.4 * ng[Y, X]
-                shade = idx[Y, X] if f.dmg else None   # already shades for plain Game Boy
-                anim_px = None
-                if self._anim_keys:
-                    at = np.isin(keys, np.fromiter(self._anim_keys, np.int64))
-                    anim_px = np.repeat(np.repeat(at, 8, 0), 8, 1)[Y, X]
-                # only the unlabelled pixels take part: their labelled neighbours
-                # must not tint them (e.g. a black void's edge next to a forest)
-                g_out, g_water = generic_shade(raw_rgb[Y, X], wrap and whole, solid=m[Y, X], tex=tex, dmg=f.dmg,
-                                               level=self.generic_level, shade=shade,
-                                               noise=(nb[Y, X], ng[Y, X], npx[Y, X], bay[Y, X]),
-                                               anim_px=anim_px, want_water=True)
-                sub = m[Y, X]
-                o = out[Y, X]
-                o[sub] = g_out[sub]
-                out[Y, X] = o
-                a_ = anim[Y, X]
-                a_[g_water & sub] = 3      # shimmer each frame
-                anim[Y, X] = a_
+                # context, in tile-aligned steps (the water test works on tiles).
+                # Rows of unlabelled tiles far apart (a status bar and a lone object
+                # lower down) are done separately, not as one box spanning both.
+                tm = m.reshape(H // 8, 8, W // 8, 8).any(axis=(1, 3))
+                trs = np.nonzero(tm.any(1))[0]
+                cuts = np.nonzero(np.diff(trs) > 5)[0] + 1
+                for grp in np.split(trs, cuts):
+                    tx = np.nonzero(tm[grp].any(0))[0]
+                    r0, r1 = max(grp.min() - 2, 0) * 8, min(grp.max() + 3, H // 8) * 8
+                    c0, c1 = max(tx.min() - 2, 0) * 8, min(tx.max() + 3, W // 8) * 8
+                    whole = (r0, r1, c0, c1) == (0, H, 0, W)
+                    Y, X = slice(r0, r1), slice(c0, c1)
+                    tex = 0.6 * nb[Y, X] + 0.4 * ng[Y, X]
+                    shade = idx[Y, X] if f.dmg else None   # already shades for plain Game Boy
+                    anim_px = None
+                    if self._anim_keys:
+                        at = np.isin(keys, np.fromiter(self._anim_keys, np.int64))
+                        anim_px = np.repeat(np.repeat(at, 8, 0), 8, 1)[Y, X]
+                    # only the unlabelled pixels take part: their labelled neighbours
+                    # must not tint them (e.g. a black void's edge next to a forest)
+                    g_out, g_water = generic_shade(raw_rgb[Y, X], wrap and whole, solid=m[Y, X], tex=tex, dmg=f.dmg,
+                                                   level=self.generic_level, shade=shade,
+                                                   noise=(nb[Y, X], ng[Y, X], npx[Y, X], bay[Y, X]),
+                                                   anim_px=anim_px, want_water=True)
+                    sub = m[Y, X]
+                    o = out[Y, X]
+                    o[sub] = g_out[sub]
+                    out[Y, X] = o
+                    a_ = anim[Y, X]
+                    a_[g_water & sub] = 3      # shimmer each frame
+                    anim[Y, X] = a_
 
         # shadows and contact darkening -----------------------------------------
         solid = obj | IS_BUILDING[mat]
@@ -1042,7 +1142,8 @@ class Enhancer:
         vis = np.zeros((32, 32), bool)
         vis[np.ix_(np.unique(np.concatenate([rows - 1, rows, rows + 1])) % 32,
                    np.unique(np.concatenate([cols - 1, cols, cols + 1])) % 32)] = True
-        bst, bidx, bprio, braw = self.layer(f, f.bg_map(), table, vis)
+        bbar, wbar = self._status_bar(f, by, bx)
+        bst, bidx, bprio, braw = self.layer(f, f.bg_map(), table, vis, bar=bbar)
         win = f.window_mask()
         rgb = bst.out[by, bx]
         sidx = bidx[by, bx]
@@ -1050,6 +1151,11 @@ class Enhancer:
         sprio = bprio[by, bx]
         stid = braw[by // 8, bx // 8]
         ui = self._ui_tiles(braw, by[0, 0] // 8, bx[0, 0] // 8)[by // 8, bx // 8]
+        if bst.bar.any():
+            hud = bst.hud[by // 8, bx // 8]
+            hbar = bst.bar[by // 8, bx // 8]
+        else:
+            hud = hbar = np.zeros((144, 160), bool)
         if win.any():
             wvis = np.zeros((32, 32), bool)
             wvis[np.ix_(np.unique(wy // 8), np.unique(wx // 8))] = True
@@ -1057,7 +1163,7 @@ class Enhancer:
             on, _ = f._window_lines()
             y0 = int(np.argmax(on))
             woff = (int(y0 + f.scy[y0]) % N, int(f.wx[y0] - 7 + f.scx[y0]) % N)
-            wst, widx, wprio, wraw = self.layer(f, f.win_map(), table, wvis, woff)
+            wst, widx, wprio, wraw = self.layer(f, f.win_map(), table, wvis, woff, bar=wbar)
             wrgb = wst.out[wy, wx]
             wsidx = widx[wy, wx]
             self._animate(wrgb, wst, wsidx, wy, wx)
@@ -1066,9 +1172,86 @@ class Enhancer:
             sprio = np.where(win, wprio[wy, wx], sprio)
             stid = np.where(win, wraw[wy // 8, wx // 8], stid)
             ui = np.where(win, self._ui_tiles(wraw, 0, 0)[wy // 8, wx // 8], ui)
+            if wst.bar.any():
+                hud = np.where(win, wst.hud[wy // 8, wx // 8], hud)
+                hbar = np.where(win, wst.bar[wy // 8, wx // 8], hbar)
+        self._hud_text(rgb, hud, hbar)
         self._sprites(f, rgb, sidx, sprio, ui, overworld=table is not None)
         self._textbox(rgb, sidx, stid, ui)
         return fx.snes15(rgb)
+
+    @staticmethod
+    def _status_bar(f, by, bx):
+        """32x32 masks of status-bar tiles in the BG map and the window map.
+
+        A status bar is a band of at most 40 lines along the top or bottom of the
+        screen that doesn't scroll with the rest: either a full-width window, or
+        BG lines whose scroll differs from the playfield's."""
+        bbar = wbar = None
+        on, row = f._window_lines()
+        lines = np.nonzero(on)[0]
+        if 0 < len(lines) <= 40 and lines[-1] == 143 and len(lines) == lines[-1] - lines[0] + 1                 and (f.wx[lines] <= 7).all():
+            wbar = np.zeros((32, 32), bool)
+            wbar[np.unique(row[lines] // 8)] = True
+        off = f.scx.astype(np.int32) * 256 + f.scy.astype(np.int32)
+        main = np.bincount(off).argmax()
+        other = off != main
+        first = int(np.argmin(other)) if other[0] else 0          # lines before the playfield
+        last = 143 - int(np.argmin(other[::-1])) if other[-1] else 143
+        band = np.zeros(144, bool)
+        if 0 < first <= 40:
+            band[:first] = True
+        if 0 < 143 - last <= 40:
+            band[last + 1:] = True
+        band &= ~on
+        if band.any():
+            bbar = np.zeros((32, 32), bool)
+            bbar[by[band] // 8, bx[band] // 8] = True
+        return bbar, wbar
+
+    def _hud_text(self, rgb, hud, bar):
+        """SNES-style status bar: a dark gradient panel, cream text with a shadow.
+
+        `hud` marks blank and two-colour tiles in the bar (text); their darker
+        colour is the lettering. The panel also fills the paper of other bar tiles
+        (icons, gauges) where it connects to the text area, but not their insides."""
+        rows = np.nonzero(bar.any(1))[0]
+        if not len(rows):
+            return
+        r0, r1 = rows[0], rows[-1] + 1        # work on the bar's lines only
+        full, rgb, hud, bar = rgb, rgb[r0:r1], hud[r0:r1], bar[r0:r1]
+        if not hud.any():
+            return
+        ck = (r0, rgb.tobytes(), np.packbits(hud).tobytes(), np.packbits(bar).tobytes())
+        hit = self._hud_cache
+        if hit is not None and hit[0] == ck:      # the bar hasn't changed: reuse it
+            full[r0:r1] = hit[1]
+            return
+        lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
+        lo, hi = lum[hud].min(), lum[hud].max()
+        if hi - lo < 24:
+            return                      # nothing but blank tiles
+        ink = hud & (lum < (lo + hi) / 2)
+        paper = bar & (lum >= hi - 24) & ~ink
+        # the panel: paper reachable from the text tiles without crossing a line
+        panel = paper & hud
+        for _ in range(10):
+            g = panel | fx.shift(panel, 1, 0) | fx.shift(panel, -1, 0) | fx.shift(panel, 0, 1) | fx.shift(panel, 0, -1)
+            g &= paper
+            if (g == panel).all():
+                break
+            panel = g
+        steps = fx.hx('#3a56c8', '#3048b8', '#283ca4', '#203090', '#1a267c', '#141e68')
+        k = np.clip((SY[r0:r1] - r0) * len(steps) // max(r1 - r0, 1), 0, len(steps) - 1)
+        rgb[panel] = steps[k][panel]
+        shadow = (fx.shift(ink, 1, 1) | fx.shift(ink, 0, 1)) & panel
+        rgb[shadow] = fx.hx('#060c38')[0]
+        text = fx.hx('#fff4d0', '#f4e0a8', '#d8b878')
+        top = ink & ~fx.shift(ink, 1, 0)
+        tone = np.where(top, 0, np.where(fx.shift(ink, -1, 0), 1, 2))
+        rgb[ink] = text[tone][ink]
+        full[r0:r1] = rgb
+        self._hud_cache = (ck, rgb.copy())
 
     def _ui_tiles(self, raw, oy, ox):
         """Which tiles get the SNES text-box style.
