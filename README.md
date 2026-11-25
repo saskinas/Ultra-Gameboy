@@ -99,10 +99,12 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
   SNES-style text boxes, and only framed text gets the box style.
 - **Link's Awakening DX:** only the tiles around Tarin and Marin's house in
   Mabe Village are labelled. Everything else is generic.
-- **Super Mario Land:** World 1 has a 16-bit platformer preset: gradient sky,
-  filled outline hills, grassy ground over earth, gold ? blocks and coins, pipes
-  lit as cylinders, soft clouds. Other worlds use the generic look until labelled
-  (`tools/hash_sheet.py` makes the labelling sheet).
+- **Super Mario Land:** all four worlds have a 16-bit platformer preset:
+  gradient sky, filled outline hills, grassy ground over earth, gold ? blocks and
+  coins, pipes lit as cylinders, clouds, the sea in World 2, stone and vines in
+  World 3, bamboo and clouds in World 4. `tools/mario_levels.py` jumps to every
+  level by memory edits on the title screen; `tools/hash_sheet.py` makes the
+  labelling sheets.
 - **Balloon Kid:** generic only, as the no-preset test. For plain Game Boy
   games, generic mode also gives volume to compact shapes on the lightest colour
   (trees, bushes, hills) and lights large terrain from above with depth. Press G
