@@ -28,7 +28,7 @@ _OVERWORLD[0x52] = 'G'
 for t in (0x14, 0x04):
     _OVERWORLD[t] = 'W'
 for t in (0x2A, 0x2B, 0x3A, 0x3B):
-    _OVERWORLD[t] = 'T'
+    _OVERWORLD[t] = 'P'           # the cylinder "trees": lit like posts / bollards
 for t in (0x0E, 0x55):
     _OVERWORLD[t] = 'P'
 for t in (0x05, 0x06, 0x07, 0x08, 0x09, 0x15, 0x16, 0x17, 0x18, 0x19,
@@ -266,7 +266,7 @@ TILESETS[3] = _table(
 # (tile ids row by row, material)
 STAMPS = {   # by tileset: the same tile number means different things in each
     0: [
-        (((0x2A, 0x2B), (0x3A, 0x3B)), 'T'),
+        (((0x2A, 0x2B), (0x3A, 0x3B)), 'P'),      # cylinder barriers
         (((0x2D, 0x2E), (0x3D, 0x3E)), 'T'),
         (((0x40, 0x41), (0x50, 0x51)), 'T'),
         (((0x0E,), (0x55,)), 'P'),

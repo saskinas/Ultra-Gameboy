@@ -138,6 +138,7 @@ def main():
     os.makedirs(os.path.dirname(qs), exist_ok=True)
     shots = os.path.join(HERE, 'out', 'shots')
     times = []
+    pace = {}      # emulated frames per displayed frame (debug)
     running = True
     while running:
         ff = pygame.key.get_pressed()[pygame.K_SPACE]
@@ -180,14 +181,16 @@ def main():
             stepped = True
         elif audio.ok:
             # the sound card is the clock: emulate until enough audio is queued
-            stepped = False
+            stepped = 0
             for _ in range(4):
                 if not audio.hungry():
                     break
                 pb.tick(1, True)
                 note_tick(pb)
                 audio.push(pb)
-                stepped = True
+                stepped += 1
+            if stepped:
+                pace[stepped] = pace.get(stepped, 0) + 1
             if not stepped:
                 time.sleep(0.002)
                 continue
@@ -218,6 +221,7 @@ def main():
 
     if audio.ok:
         print('audio gaps:', audio.underruns)
+        print('frames emulated per frame shown:', dict(sorted(pace.items())))
     ram = args.rom + '.ram'
     if not args.no_save and os.path.exists(ram):
         shutil.copyfile(ram, ram + '.bak')   # keep the previous in-game save

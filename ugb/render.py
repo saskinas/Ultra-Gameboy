@@ -37,6 +37,7 @@ IS_BUILDING = _set_lut(BUILDING)
 IS_ANIM = _set_lut(ANIM)
 IS_GL = _set_lut('gl')
 MARGIN = 3   # tiles of context around a redrawn band (stamps, shadows, shore)
+SETTLE_FRAMES = 12   # still frames before the on-screen area is redrawn from scratch
 
 WATER_T = np.array([0.80, 0.42, 0.30, 0.10], np.float32)
 PETAL_T = np.array([0.0, 0.95, 0.6, 0.15], np.float32)
@@ -375,6 +376,8 @@ class LayerState:
         self.idx = None
         self.out = np.zeros((N, N, 3), np.float32)
         self.stale = np.zeros((32, 32), bool)
+        self.idle = 0              # frames since the map last changed
+        self.settled = False       # whether the settle pass has run since
         self.anim = np.zeros((N, N), np.int8)      # 0 none, 1 water, 2 flower bloom/bed
         self.extra = np.zeros((N, N), np.float32)  # material-specific tone offset
         self.over = np.full((N, N), np.nan, np.float32)  # fixed tone (foam)
@@ -505,6 +508,16 @@ class Enhancer:
                     g |= np.roll(grow, (dy, dx), (0, 1))
             grow = g
         st.stale |= grow
+        # Settle pass: once nothing has changed for a moment, redraw what is on
+        # screen from scratch. Anything drawn earlier from stale context (tiles the
+        # game hadn't reloaded yet) is cleared, whatever game or effect caused it.
+        if grow.any() or fresh:
+            st.idle, st.settled = 0, False
+        else:
+            st.idle += 1
+            if st.idle >= SETTLE_FRAMES and not st.settled:
+                st.stale |= vis
+                st.settled = True
         need = st.stale & vis
         if need.any():
             for r0, rl, c0, cl in self._bands(need):
@@ -673,13 +686,21 @@ class Enhancer:
                                       LY, LX, YY, nb, ng, wrap, npx, bay)
         bld = IS_BUILDING[mat] | ((mat == M['T']) & ~obj)   # plants in pots too
         if bld.any():
-            free = bld & (idx == 0)
+            # Only tiles that touch a ground tile, and only one tile deep: this is
+            # for roof corners and eaves. A long fill would let far-away tiles
+            # (even stale ones not yet reloaded by the game) recolour whole walls.
+            g_t = IS_GROUND[tmat]
+            near_t = g_t.copy()
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    near_t |= fx.shift(g_t, dy, dx, False, wrap)
+            near = np.repeat(np.repeat(near_t, 8, 0), 8, 1)
+            free = bld & (idx == 0) & near
             reach = fx.dilate(IS_GROUND[mat], wrap) & free
-            for _ in range(24):
-                n = reach.copy()
-                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    n |= np.roll(reach, (dy, dx), (0, 1))
-                n &= free
+            for _ in range(8):
+                n = fx.dilate(reach, wrap) & free
+                n = (reach | (n & (fx.shift(reach, 1, 0, False, wrap) | fx.shift(reach, -1, 0, False, wrap)
+                                   | fx.shift(reach, 0, 1, False, wrap) | fx.shift(reach, 0, -1, False, wrap))))
                 if (n == reach).all():
                     break
                 reach = n
@@ -734,10 +755,11 @@ class Enhancer:
                                         ('M', 'metal', [0.92, 0.64, 0.4, 0.05], 0.03),
                                         ('O', 'furniture', [0.88, 0.64, 0.42, 0.06], 0.08),
                                         ('E', 'earth', [0.8, 0.6, 0.42, 0.12], 0.14),
-                                        ('T', 'tree', [0.86, 0.62, 0.42, 0.1], 0.1)):
+                                        ('T', 'tree', [0.86, 0.62, 0.42, 0.1], 0.1),
+                                        ('P', 'post', [0.9, 0.62, 0.4, 0.0], 0.0)):
             m = mat == M[code]
-            if code == 'T':
-                m = m & ~obj      # stamped trees are lit as objects below
+            if code in 'TP':
+                m = m & ~obj      # stamped trees and posts are lit as objects below
             if m.any():
                 t = ch(vals) + noise * (ng - 0.5)
                 if code == 'N':   # a diagonal glint across windows
