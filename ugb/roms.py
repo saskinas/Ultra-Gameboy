@@ -3,7 +3,8 @@ import glob
 import os
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ALIASES = {'yellow': 'Pokemon - Yellow', 'zelda': "Link's Awakening", 'balloon': 'Balloon Kid'}
+ALIASES = {'yellow': 'Pokemon - Yellow', 'zelda': "Link's Awakening", 'balloon': 'Balloon Kid',
+           'mario': 'Super Mario Land'}
 
 
 def rom_path(name=None):

@@ -242,8 +242,13 @@ class DmgColours:
         self.n = 0
 
     def _vote(self, key, colours):
-        cols, counts = np.unique(colours.reshape(-1, 3), axis=0, return_counts=True)
-        best = tuple(cols[np.argmax(counts)].tolist())
+        c = colours.reshape(-1, 3)
+        if len(c) > 256:                      # a sample is plenty for the mode
+            c = c[:: len(c) // 256]
+        packed = (c[:, 0].astype(np.int32) << 16) | (c[:, 1].astype(np.int32) << 8) | c[:, 2]
+        vals, counts = np.unique(packed, return_counts=True)
+        v = int(vals[np.argmax(counts)])
+        best = ((v >> 16) & 255, (v >> 8) & 255, v & 255)
         self.votes.setdefault(key, collections.deque(maxlen=self.WINDOW)).append(best)
 
     def _best(self, key):
@@ -261,7 +266,10 @@ class DmgColours:
         self.n += 1
         if not f.oam_exact or not (f.lcdc & 0x80):
             return
-        if self.n % (16 if self.complete() else 4):
+        # sample often until settled; games that never show some shade/palette
+        # combination would otherwise keep sampling at the fast rate forever
+        every = 16 if self.complete() else (4 if self.n < 600 else 32)
+        if self.n % every:
             return
         by, bx, wy, wx = f.screen_coords()
         bidx = f.layer(f.bg_map())[0]

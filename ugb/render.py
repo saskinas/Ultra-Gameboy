@@ -22,7 +22,7 @@ L = np.array([-1.0, -1.0, 1.0], np.float32) / np.sqrt(3)   # light from the top 
 GROUND = ['g', 'l', 'f', 'G', 'F', 'C', 'E']        # receive shadows
 BUILDING = ['R', 'H', 'N', 'D', 'S', 'O', 'M', 'L']   # cast shadows
 ANIM = ['W', 'f']
-M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOELU?'}   # material codes as bytes (fast compares)
+M = {c: ord(c) for c in 'glfGWTPBRHNDSKFCMOELUYhVQZA?'}   # material codes as bytes (fast compares)
 
 
 def _set_lut(chars):
@@ -53,6 +53,13 @@ def _interval(dirty_1d):
     start = int(d[(k + 1) % len(d)])
     length = 32 - (int(gaps[k]) - 1)
     return start, length
+
+
+class _Ramps(dict):
+    """A preset's colour ramps; a ramp it doesn't define falls back to neutral grey."""
+
+    def __missing__(self, key):
+        return self.get('neutral', fx.hx('#202028', '#505060', '#8a8a98', '#c8c8d0', '#f4f4f8'))
 
 
 def _border_rows(t):
@@ -629,7 +636,7 @@ class Enhancer:
 
     def _render_patch(self, f, idx, pal, keys, tmat, table, ys, xs):
         p = self.p
-        R = dict(p.RAMPS, **getattr(p, 'RAMP_OVERRIDES', {}).get(self._tileset, {}))
+        R = _Ramps(p.RAMPS, **getattr(p, 'RAMP_OVERRIDES', {}).get(self._tileset, {}))
         H, W = idx.shape
         YY = ys[:, None] + 0 * xs[None, :]
         XX = xs[None, :] + 0 * ys[:, None]
@@ -638,6 +645,25 @@ class Enhancer:
         nb, nm, ng, npx, bay = (self.n_big[sel], self.n_mid[sel], self.n_grain[sel],
                                 self.n_px[sel], self.bay[sel])
         th, tw = tmat.shape
+        if (tmat == M['A']).any():
+            # A fill tile (one plain shade) can be the inside of a platform or a
+            # band of sky. It is lawn when connected to ground tiles, else sky.
+            amb = tmat == M['A']
+            grounded = IS_GROUND[tmat] | (tmat == M['L']) | (tmat == M['E'])
+            reach = np.zeros_like(amb)
+            for _ in range(th + tw):
+                grow = reach | grounded
+                n = amb & (fx.shift(grow, 1, 0, False, False) | fx.shift(grow, -1, 0, False, False)
+                           | fx.shift(grow, 0, 1, False, False) | fx.shift(grow, 0, -1, False, False))
+                if (n == reach).all():
+                    break
+                reach = n
+            tmat = tmat.copy()
+            tmat[amb] = np.where(reach[amb], M['l'], M['Y'])
+        idx_raw = idx                  # colour numbers, for the game's own palette
+        if f.dmg:
+            # plain Game Boy: ramps go by shade (0 white .. 3 black), not raw colour
+            idx = np.array([(f.bgp >> (2 * i)) & 3 for i in range(4)])[idx]
         mat = np.repeat(np.repeat(tmat, 8, 0), 8, 1)
         tile_mat = mat.copy()
         ch = lambda vals: np.choose(idx, vals)
@@ -710,6 +736,21 @@ class Enhancer:
             fill = np.bincount(gcodes, minlength=256).argmax() if gcodes.size else M['g']
             mat[reach] = fill
 
+        # Open sky: white pixels in other tiles (around clouds, trees, letters, the
+        # space above a grassy edge) that connect to the sky without crossing an
+        # outline are sky too. Kept local, like the building fill.
+        sky0 = mat == M['Y']
+        if sky0.any():
+            free = ~sky0 & (idx == 0) & ~obj
+            reach = fx.dilate(sky0, wrap) & free
+            for _ in range(24):
+                n = reach | ((fx.shift(reach, 1, 0, False, wrap) | fx.shift(reach, -1, 0, False, wrap)
+                              | fx.shift(reach, 0, 1, False, wrap) | fx.shift(reach, 0, -1, False, wrap)) & free)
+                if (n == reach).all():
+                    break
+                reach = n
+            mat[reach] = M['Y']
+
         out = np.zeros((H, W, 3), np.float32)
         anim = np.zeros((H, W), np.int8)
         extra = np.zeros((H, W), np.float32)
@@ -758,15 +799,37 @@ class Enhancer:
                                         ('O', 'furniture', [0.88, 0.64, 0.42, 0.06], 0.08),
                                         ('E', 'earth', [0.8, 0.6, 0.42, 0.12], 0.14),
                                         ('T', 'tree', [0.86, 0.62, 0.42, 0.1], 0.1),
-                                        ('P', 'post', [0.9, 0.62, 0.4, 0.0], 0.0)):
+                                        ('P', 'post', [0.9, 0.62, 0.4, 0.0], 0.0),
+                                        ('V', 'pipe', [0.9, 0.62, 0.4, 0.05], 0.0),
+                                        ('Q', 'gold', [0.92, 0.66, 0.42, 0.12], 0.0)):
             m = mat == M[code]
-            if code in 'TP':
-                m = m & ~obj      # stamped trees and posts are lit as objects below
+            if code in 'TPVQ':
+                m = m & ~obj      # stamped objects are lit below
             if m.any():
                 t = ch(vals) + noise * (ng - 0.5)
                 if code == 'N':   # a diagonal glint across windows
                     t = np.where(((XX + off_x + YY + off_y) % 7 < 2) & (idx != 3), t + 0.25, t)
                 out[m] = fx.pick(R[ramp], t)[m]
+
+        # sky: a stepped vertical gradient, deeper at the top
+        sky = mat == M['Y']
+        hill_line = (mat == M['h']) & (idx >= 2)
+        if sky.any() or hill_line.any():
+            # outline hills: anything below a hill's outline in its column is inside it
+            under = np.maximum.accumulate(hill_line, axis=0) & ~hill_line
+            inside = under & (sky | (mat == M['h']))
+            t = 1.0 - np.clip((YY - 8) / 136.0, 0, 1) * 0.85 + 0.04 * (nb - 0.5)
+            m = sky & ~inside
+            out[m] = fx.pick(R['sky'], 1 - t, bay, 0.9)[m]
+            if inside.any():
+                th_ = 0.75 - 0.35 * np.clip((YY % 144) / 144.0, 0, 1) + 0.1 * (nb - 0.5)
+                out[inside] = fx.pick(R['hill'], th_, bay, 0.6)[inside]
+            out[hill_line] = fx.pick(R['hill'], np.full((H, W), 0.12, np.float32))[hill_line]
+            rest = (mat == M['h']) & ~hill_line & ~inside
+            out[rest] = fx.pick(R['sky'], 1 - t, bay, 0.9)[rest]
+        m = mat == M['Z']
+        if m.any():   # clouds: soft white to blue by shade
+            out[m] = fx.pick(R['cloud'], ch([0.98, 0.72, 0.45, 0.18]))[m]
 
         # ledges: a lit grassy lip, a short dirt face, a shadow below (cast later)
         m = mat == M['L']
@@ -794,6 +857,19 @@ class Enhancer:
             out[m] = fx.pick(R['tree'], t)[m]
             trunk = m & (LY - cy > ry * 0.62) & (np.abs(LX - cx) < rx * 0.45)
             out[trunk] = fx.pick(R['trunk'], ch([0.9, 0.6, 0.4, 0.0]))[trunk]
+        m = obj & (mat == M['Q'])
+        if m.any():   # blocks: a flat face with a lit top-left bevel and a dark bottom-right
+            far = edge & ~lit_edge
+            t = ch([0.95, 0.72, 0.5, 0.15]) + 0.18 * (-nx - ny) * 0.5
+            t = np.where(lit_edge, t + 0.2, np.where(far, t - 0.25, t))
+            out[m] = fx.pick(R['gold'], t)[m]
+        m = obj & (mat == M['V'])
+        if m.any():   # pipes: green cylinders
+            nz = np.sqrt(np.clip(1 - nx ** 2, 0, 1))
+            lam = np.clip((nx * L[0] + nz * L[2] + 0.6) / 1.2, 0, 1)
+            t = ch([0.95, 0.7, 0.45, 0.05]) * 0.4 + 0.7 * lam - 0.05
+            t = np.where(edge & (idx == 3), np.where(lit_edge, 0.12, 0.0), t)
+            out[m] = fx.pick(R['pipe'], t)[m]
         m = obj & (mat == M['B'])
         if m.any():   # boulders: lit spheres in rock colours
             nz = np.sqrt(np.clip(1 - nx ** 2 - ny ** 2, 0, 1))
@@ -812,7 +888,7 @@ class Enhancer:
         # unknown tiles: the game's own colours, with dither smoothed out --------
         m = mat == M['?']
         if m.any():
-            raw_rgb = f.bgpal[pal, idx].astype(np.float32)
+            raw_rgb = f.bgpal[pal, idx_raw].astype(np.float32)
             flat = (raw_rgb[m] == raw_rgb[m][0]).all()
             if flat:
                 # e.g. the black outside a room: nothing for the generic pass to do
@@ -820,13 +896,13 @@ class Enhancer:
             else:
                 # run the generic pass only on the unlabelled area, plus a margin of
                 # context, in tile-aligned steps (the water test works on tiles)
-                ty, tx = np.nonzero(m[::8, ::8] | m[7::8, 7::8])
+                ty, tx = np.nonzero(m.reshape(H // 8, 8, W // 8, 8).any(axis=(1, 3)))
                 r0, r1 = max(ty.min() - 2, 0) * 8, min(ty.max() + 3, H // 8) * 8
                 c0, c1 = max(tx.min() - 2, 0) * 8, min(tx.max() + 3, W // 8) * 8
                 whole = (r0, r1, c0, c1) == (0, H, 0, W)
                 Y, X = slice(r0, r1), slice(c0, c1)
                 tex = 0.6 * nb[Y, X] + 0.4 * ng[Y, X]
-                shade = np.array([(f.bgp >> (2 * i)) & 3 for i in range(4)])[idx[Y, X]] if f.dmg else None
+                shade = idx[Y, X] if f.dmg else None   # already shades for plain Game Boy
                 anim_px = None
                 if self._anim_keys:
                     at = np.isin(keys, np.fromiter(self._anim_keys, np.int64))
@@ -857,7 +933,7 @@ class Enhancer:
         out *= mul
 
         m = mat == M['U']   # text boxes are styled in screen space
-        out[m] = f.bgpal[pal, idx][m]
+        out[m] = f.bgpal[pal, idx_raw][m]
         return dict(out=out, anim=anim, extra=extra, over=over, mul=mul)
 
     def _game_colours(self, f, idx, pal, mat, obj, fringe, cx, cy, rx, ry, LY, LX, YY, nb, ng, wrap,

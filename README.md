@@ -9,8 +9,8 @@ one exists; every other game gets the **generic** enhancer.
 ## Setup
 
 No ROMs are included. Dump your own cartridges and put the files in `input\`.
-The short names `yellow`, `zelda` and `balloon` match files containing
-"Pokemon - Yellow", "Link's Awakening" and "Balloon Kid".
+The short names `yellow`, `zelda`, `balloon` and `mario` match files containing
+"Pokemon - Yellow", "Link's Awakening", "Balloon Kid" and "Super Mario Land".
 
 ```powershell
 python -m venv .venv
@@ -38,6 +38,10 @@ short name or path:
 
 ```powershell
 .venv\Scripts\python -m ugb.app balloon
+```
+
+```powershell
+.venv\Scripts\python -m ugb.app mario
 ```
 
 Leave out `--state` to boot the game from its title screen. The in-game save goes
@@ -95,6 +99,10 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
   SNES-style text boxes, and only framed text gets the box style.
 - **Link's Awakening DX:** only the tiles around Tarin and Marin's house in
   Mabe Village are labelled. Everything else is generic.
+- **Super Mario Land:** World 1 has a 16-bit platformer preset: gradient sky,
+  filled outline hills, grassy ground over earth, gold ? blocks and coins, pipes
+  lit as cylinders, soft clouds. Other worlds use the generic look until labelled
+  (`tools/hash_sheet.py` makes the labelling sheet).
 - **Balloon Kid:** generic only, as the no-preset test. For plain Game Boy
   games, generic mode also gives volume to compact shapes on the lightest colour
   (trees, bushes, hills) and lights large terrain from above with depth. Press G
