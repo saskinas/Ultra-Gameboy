@@ -6,6 +6,17 @@ artwork is shipped. Each frame is rebuilt from the game's own video memory
 (tiles, tile maps, palettes, sprites). A per-game **preset** adds knowledge where
 one exists; every other game gets the **generic** enhancer.
 
+## Download for Windows (no setup)
+
+Get **UltraGameBoy-windows.zip** from the
+[latest release](https://github.com/saskinas/Ultra-Gameboy/releases/latest),
+unzip it, double-click **Ultra Game Boy.exe** and choose a game file you own
+(.gb or .gbc). Windows may say it protected your PC, because the app isn't
+signed: click **More info**, then **Run anyway**. "How to play.txt" in the
+folder has the controls. No games are included.
+
+The rest of this page is for running it from source.
+
 ## Setup
 
 No ROMs are included. Dump your own cartridges and put the files in `input\`.
@@ -55,6 +66,7 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
 | Enter / Backspace | Start / Select |
 | Tab | Switch between enhanced and original |
 | G | Generic shading strength: subtle / strong |
+| E | Eye candy on / off (presets with effects, like Kirby's) |
 | Space (hold) | Fast-forward |
 | F2 / F4 | Quick save / load state (`states\quick.state`) |
 | F12 | Screenshot, original next to enhanced, saved in `out\shots` |
@@ -90,8 +102,20 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
     light added by material: sphere-lit trees, cylinder-lit posts, roof
     gradients, ground texture, drop shadows. Tiles are recognised by a hash of
     their pixels, because the game moves graphics between VRAM slots.
-- `ugb/presets/` holds `pokemon_yellow.py`, `zelda_ladx.py` and `generic.py`.
-  Presets are chosen by cartridge title.
+  - **Line-art presets (Kirby's Dream Land):** `ugb/atlas.py` captures a
+    whole area in a hidden copy of the game, and `ugb/lineart.py` sorts its
+    outlined white shapes into sky, clouds, hills, trunks, walls and water.
+    The renderer looks each pixel up by its world position. Solved areas are
+    kept in `cache\` and rebuilt when the code changes.
+  - **Mid-frame tile-map switches, any game:** `Frame.line_maps` works out
+    which tile map each line was drawn from, by checking against the
+    emulator's picture.
+  - **Eye candy:** per-pixel effects (twinkle, glints, light ripples, sway),
+    drifting motes and sprite trails, switched on by a preset's
+    `EYE_CANDY`, `MOTES` and `TRAIL_SPRITES`.
+- `ugb/presets/` holds `pokemon_yellow.py`, `zelda_ladx.py`,
+  `mario_land.py`, `kirby_dream_land.py` and `generic.py`. Presets are chosen
+  by cartridge title.
 - `ugb/app.py` streams sound through an audio callback and paces the emulator by
   it, so a slow frame never cuts the music.
 
@@ -111,12 +135,20 @@ to the ROM's `.ram` file in `input\`, and the previous one is kept as `.ram.bak`
   World 3, bamboo and clouds in World 4. `tools/mario_levels.py` jumps to every
   level by memory edits on the title screen; `tools/hash_sheet.py` makes the
   labelling sheets.
-- **Kirby's Dream Land:** the special preset (`docs/KIRBY_PLAN.md`). Green
-  Greens' first area so far: a banded morning sky with a parallax backdrop
-  drawn by code, white clouds, green-filled domes and hoops, clean foliage, and
-  a pink status bar with yellow health. Its line art (white shapes outlined on
-  a white sky) is sorted map-wide into open sky, cloud bodies and hills.
-  `tools/kirby_run.py` records states by flying through the level.
+- **Kirby's Dream Land:** the whole game has its own look
+  (`docs/KIRBY_PLAN.md`, notes in `docs/KIRBY_TECHNIQUES.md`):
+  - Green Greens' morning;
+  - Castle Lololo's warm stone and arched galleries;
+  - Float Islands' sea, ship and caves;
+  - Bubbly Clouds' temple and starry sky;
+  - Mt. DeDeDe's hall, boss rush and ring;
+  - the ending and credits.
+
+  The Extra Game has twilight and night skies for every stage. Eye candy
+  (`docs/KIRBY_EYE_CANDY_PLAN.md`): twinkling stars, sea glints, underwater
+  light, swaying grass, drifting motes and a warp star trail.
+  `tools/kirby_warm.py` fills the area cache, and `tools/kirby_demo.py`
+  records a demo video.
 - **Balloon Kid:** generic only, as the no-preset test. For plain Game Boy
   games, generic mode also gives volume to compact shapes on the lightest colour
   (trees, bushes, hills) and lights large terrain from above with depth. Press G
@@ -135,6 +167,21 @@ the tiles that still have no material. `python tools/pokewarp.py
 states\pallet_town.state indoor` does the same for all 191 interiors.
 `tools/survey_tiles.py` makes a labelling sheet per graphics set, and
 `tools/indoor_render.py` shows interiors original next to enhanced.
+
+## Build the Windows app
+
+```powershell
+.venv\Scripts\python -m pip install pyinstaller
+```
+
+```powershell
+.venv\Scripts\python tools\build_windows.py
+```
+
+This makes `dist\Ultra Game Boy\` and `dist\UltraGameBoy-windows.zip`. The
+app starts with a game picker (`ugb/launcher.py`) and keeps quick saves,
+screenshots and the area cache in `%APPDATA%\Ultra Game Boy`. The
+instructions for players are in `docs/PLAYERS.md`.
 
 `tools/` holds the helpers used to build presets: scripted play (`drive.py`),
 tile sheets and grids (`tilesheet.py`, `mapgrid.py`, `hashgrid.py`),
