@@ -41,9 +41,14 @@ def tile_noise(size, cells, seed):
 
 # ---- morphology: wrap=True for the toroidal BG layer, False for local patches ----
 def shift(m, dy, dx, fill=False, wrap=False):
-    r = np.roll(m, (dy, dx), (0, 1))
+    """m moved by (dy, dx): wrapped round (the BG layer), or with `fill` coming in."""
     if wrap:
-        return r
+        return np.roll(m, (dy, dx), (0, 1))
+    h, w = m.shape[:2]
+    if abs(dy) >= h or abs(dx) >= w:
+        return np.full_like(m, fill)
+    r = np.empty_like(m)
+    r[max(dy, 0):h + min(dy, 0), max(dx, 0):w + min(dx, 0)] = m[max(-dy, 0):h + min(-dy, 0), max(-dx, 0):w + min(-dx, 0)]
     if dy > 0:
         r[:dy] = fill
     elif dy < 0:
@@ -56,21 +61,15 @@ def shift(m, dy, dx, fill=False, wrap=False):
 
 
 def dilate(m, wrap=False):
-    out = m.copy()
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            if dy or dx:
-                out |= shift(m, dy, dx, False, wrap)
-    return out
+    """3x3 grow, done as a row pass then a column pass (the same, with half the shifts)."""
+    a = m | shift(m, 0, 1, False, wrap) | shift(m, 0, -1, False, wrap)
+    return a | shift(a, 1, 0, False, wrap) | shift(a, -1, 0, False, wrap)
 
 
 def erode(m, wrap=False):
-    out = m.copy()
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            if dy or dx:
-                out &= shift(m, dy, dx, True, wrap)
-    return out
+    """3x3 shrink, done as a row pass then a column pass."""
+    a = m & shift(m, 0, 1, True, wrap) & shift(m, 0, -1, True, wrap)
+    return a & shift(a, 1, 0, True, wrap) & shift(a, -1, 0, True, wrap)
 
 
 def fill_holes(m):
@@ -96,13 +95,16 @@ def solid_from_outline(outline):
 
 
 def box_blur(a, r=1, wrap=False):
-    acc = np.zeros(a.shape, np.float32)
-    k = 0
-    for dy in range(-r, r + 1):
-        for dx in range(-r, r + 1):
-            acc += shift(a.astype(np.float32), dy, dx, 0.0, wrap)
-            k += 1
-    return acc / k
+    """Mean over a (2r+1) square (zeros beyond the edge unless wrapped): a row
+    pass then a column pass."""
+    a = a.astype(np.float32)
+    acc = a.copy()
+    for d in range(1, r + 1):
+        acc += shift(a, 0, d, 0.0, wrap) + shift(a, 0, -d, 0.0, wrap)
+    out = acc.copy()
+    for d in range(1, r + 1):
+        out += shift(acc, d, 0, 0.0, wrap) + shift(acc, -d, 0, 0.0, wrap)
+    return out / float((2 * r + 1) ** 2)
 
 
 def snes15(rgb):

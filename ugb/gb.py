@@ -49,7 +49,15 @@ class Frame:
         # PyBoy's bank reads stop one byte short of 0xA000, so add the last byte.
         v0 = mem[0, 0x8000:0x9FFF] + [mem[0, 0x9FFF]]
         v1 = [0] * 0x2000 if self.dmg else mem[1, 0x8000:0x9FFF] + [mem[1, 0x9FFF]]
-        self.tiles = np.stack([decode_tiles(v0[:0x1800]), decode_tiles(v1[:0x1800])])  # (2,384,8,8)
+        # (decoded once and reused while the tile graphics stay the same)
+        raw = bytes(v0[:0x1800]) + (b'' if self.dmg else bytes(v1[:0x1800]))
+        prev = _TILES.get(id(pb))
+        if prev is not None and prev[0] == raw:
+            self.tiles = prev[1]
+        else:
+            t1 = np.zeros((384, 8, 8), np.uint8) if self.dmg else decode_tiles(v1[:0x1800])
+            self.tiles = np.stack([decode_tiles(v0[:0x1800]), t1])  # (2,384,8,8)
+            _TILES[id(pb)] = (raw, self.tiles)
         self.maps = np.array([v0[0x1800:0x1C00], v0[0x1C00:0x2000]], np.uint8).reshape(2, 32, 32)
         self.attrs = np.array([v1[0x1800:0x1C00], v1[0x1C00:0x2000]], np.uint8).reshape(2, 32, 32)
         # Games copy next frame's sprites into OAM during vertical blank, which has
@@ -122,6 +130,30 @@ class Frame:
         return np.where(tid < 128, tid + 256, tid)
 
     def layer(self, which):
+        """Full 256x256 layer for map `which` (0 = $9800, 1 = $9C00), kept for
+        the frame (several passes ask for it)."""
+        c = self.__dict__.setdefault('_layers', {})
+        if which not in c:
+            # (and between frames while the map, its attributes and the tile
+            # graphics stay the same: most frames only scroll)
+            key = (self.lcdc & 0x10, self.maps[which].tobytes(), self.attrs[which].tobytes(),
+                   self._tiles_key())
+            prev = _LAYERS.get((id(self.pb), which))
+            if prev is not None and prev[0] == key:
+                c[which] = prev[1]
+            else:
+                c[which] = self._layer(which)
+                _LAYERS[(id(self.pb), which)] = (key, c[which])
+        return c[which]
+
+    def _tiles_key(self):
+        k = self.__dict__.get('_tk')
+        if k is None:
+            import hashlib
+            k = self._tk = hashlib.blake2b(self.tiles.tobytes(), digest_size=8).digest()
+        return k
+
+    def _layer(self, which):
         """Full 256x256 layer for map `which` (0 = $9800, 1 = $9C00).
 
         Returns colour index (256,256), palette number (256,256), BG-priority
@@ -170,6 +202,13 @@ class Frame:
         if self._line_maps is not None:
             return self._line_maps
         base = self.bg_map()
+        # the answer holds while the scroll layout does: reuse it for a while
+        runs = (np.diff(self.scx) != 0) | (np.diff(self.scy) != 0)
+        key = (base, self.lcdc & 0x01, runs.tobytes())
+        prev = _LINE_MAPS.get(id(self.pb))
+        if prev is not None and prev[0] == key and 0 <= self.pb.frame_count - prev[1] < 20:
+            self._line_maps = prev[2]
+            return prev[2]
         lm = np.full(144, base, np.int8)
         if self.lcdc & 0x01:
             by, bx, _, _ = np.broadcast_arrays(*self.screen_coords())
@@ -194,6 +233,7 @@ class Frame:
                     if cb[sel].sum() > 0 and co[sel].sum() * 4 < cb[sel].sum():
                         lm[sel] = 1 - base
         self._line_maps = lm
+        _LINE_MAPS[id(self.pb)] = (key, self.pb.frame_count, lm)
         return lm
 
     def win_map(self):
@@ -262,6 +302,9 @@ class Frame:
 
 _DMG_COLOURS = {}
 _OAM_HIST = {}
+_LINE_MAPS = {}
+_TILES = {}         # per emulator: (the raw tile data, decoded)
+_LAYERS = {}        # per emulator and map: (what it was built from, the layer)     # per emulator: (scroll layout, frame, line maps), reused for a while
 
 
 def note_tick(pb):
@@ -324,7 +367,9 @@ class DmgColours:
             return
         # sample often until settled; games that never show some shade/palette
         # combination would otherwise keep sampling at the fast rate forever
-        every = 16 if self.complete() else (4 if self.n < 600 else 32)
+        # (once every shade has its colour, check rarely: the Color's boot ROM
+        # fixes a plain game's colours, and a full check is a burst of work)
+        every = 240 if self.complete() else (4 if self.n < 600 else 32)
         if self.n % every:
             return
         by, bx, wy, wx = f.screen_coords()

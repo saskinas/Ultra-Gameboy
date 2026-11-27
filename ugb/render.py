@@ -430,6 +430,9 @@ class LayerState:
 
 class Enhancer:
     def __init__(self, preset):
+        global MARGIN
+        MARGIN = getattr(preset, 'MARGIN', 3)     # (one game per process: the app, the tools)
+        self._idle_jobs = {}        # map -> work left for idle(): tiles just off screen
         self.p = preset
         self.n_big = fx.tile_noise(N, 16, 1)
         self.n_mid = fx.tile_noise(N, 48, 2)
@@ -728,6 +731,13 @@ class Enhancer:
                 st.kind = kind
             self._kind = st.kind
         need = st.stale & vis
+        core = getattr(self, '_vis_core', {}).get(which)
+        if core is not None:
+            # tiles on screen are drawn now; those in the slack just off screen
+            # wait for idle() (spare time between frames), or until they show
+            later = need & ~core
+            need = need & core
+            self._idle_jobs[which] = (st, f, idx, pal, tkeys, tmat, table, later) if later.any() else None
         if need.any():
             for r0, rl, c0, cl in self._bands(need):
                 self._render_into(st, f, idx, pal, tkeys, tmat, table, r0, rl, c0, cl)
@@ -742,6 +752,36 @@ class Enhancer:
             st.drawn[:] = False
         st.key, st.raw, st.attrs, st.idx = key, raw.copy(), attrs.copy(), idx.copy()
         return st, idx, prio, raw
+
+    IDLE_ROWS = 4      # rows of tiles drawn per idle() call (a few ms of work)
+
+    def idle(self):
+        """Draw a few rows of the tiles just off screen that the last frame left
+        (see layer); the app calls this in spare time between frames. True when
+        it drew something, False when there was nothing left."""
+        for which, job in list(self._idle_jobs.items()):
+            if job is None:
+                continue
+            st, f, idx, pal, tkeys, tmat, table, later = job
+            later = later & st.stale
+            if not later.any():
+                self._idle_jobs[which] = None
+                continue
+            for r0, rl, c0, cl in self._bands(later):
+                m = 0 if rl == 32 else MARGIN
+                cr = (np.arange(r0 + m, r0 + rl - m)) % 32          # the band's own rows
+                cr = cr[later[cr].any(1)][:self.IDLE_ROWS]          # (the first few that need it)
+                a = int(cr[0])
+                n = int((cr[-1] - a) % 32) + 1
+                rr0, rrl = (a - MARGIN, n + 2 * MARGIN) if n + 2 * MARGIN < 32 else (0, 32)
+                self._render_into(st, f, idx, pal, tkeys, tmat, table, rr0, rrl, c0, cl)
+                mc = 0 if cl == 32 else MARGIN
+                rows = (np.arange(a, a + n)) % 32
+                cols = np.arange(c0 + mc, c0 + cl - mc) % 32
+                st.stale[np.ix_(rows, cols)] = False
+                self.stats['idle'] = self.stats.get('idle', 0) + 1
+                return True
+        return False
 
     @staticmethod
     def _line_regions(f, idx, tmat, area=None):
@@ -1378,11 +1418,13 @@ class Enhancer:
         ys = (trows[:, None] * 8 + np.arange(8)).ravel()
         xs = (tcols[:, None] * 8 + np.arange(8)).ravel()
         T = np.ix_(trows, tcols)
-        res = self._render_patch(f, idx_full[np.ix_(ys, xs)], pal_full[np.ix_(ys, xs)],
-                                 keys_full[T], tmat_full[T], table, ys, xs)
         # keep the margin out unless the patch already spans the whole ring
         my = 0 if rl == 32 else MARGIN * 8
         mx = 0 if cl == 32 else MARGIN * 8
+        self._patch_core = (my // 8, mx // 8)     # (tiles of margin: context only, not kept)
+        res = self._render_patch(f, idx_full[np.ix_(ys, xs)], pal_full[np.ix_(ys, xs)],
+                                 keys_full[T], tmat_full[T], table, ys, xs)
+        self._patch_core = (0, 0)
         iy = slice(my, len(ys) - my)
         ix = slice(mx, len(xs) - mx)
         gy, gx = np.ix_(ys[iy], xs[ix])
@@ -1835,9 +1877,17 @@ class Enhancer:
                 # Rows of unlabelled tiles far apart (a status bar and a lone object
                 # lower down) are done separately, not as one box spanning both.
                 tm = m.reshape(H // 8, 8, W // 8, 8).any(axis=(1, 3))
+                # (unlabelled tiles only in the margin are context, not kept: skip them)
+                cy, cx = getattr(self, '_patch_core', (0, 0))
+                if cy:
+                    tm[:cy] = False
+                    tm[tm.shape[0] - cy:] = False
+                if cx:
+                    tm[:, :cx] = False
+                    tm[:, tm.shape[1] - cx:] = False
                 trs = np.nonzero(tm.any(1))[0]
                 cuts = np.nonzero(np.diff(trs) > 5)[0] + 1
-                for grp in np.split(trs, cuts):
+                for grp in (np.split(trs, cuts) if len(trs) else []):
                     tx = np.nonzero(tm[grp].any(0))[0]
                     r0, r1 = max(grp.min() - 2, 0) * 8, min(grp.max() + 3, H // 8) * 8
                     c0, c1 = max(tx.min() - 2, 0) * 8, min(tx.max() + 3, W // 8) * 8
@@ -1987,12 +2037,19 @@ class Enhancer:
             self._backdrop(f)
         # tiles on screen plus one tile of slack, so scrolling never shows a stale tile
         # by depends only on the line and bx only on the line's SCX, so small sets do
-        rows = np.unique(by[:, 0] // 8)
+        # (only lines where this map shows: not under a full-width window such as
+        # a status bar, nor drawn from the other map; the rows below a level's
+        # playfield are often leftover tiles that would be redrawn for nothing)
+        shown = ~f.window_mask().all(1) & (f.line_maps() == f.bg_map())
+        rows = np.unique(by[shown if shown.any() else slice(None), 0] // 8)
         cols = np.unique(np.concatenate([((np.arange(160) + sx) & 255) // 8
                                          for sx in np.unique(f.scx).tolist()]))
         vis = np.zeros((32, 32), bool)
         vis[np.ix_(np.unique(np.concatenate([rows - 1, rows, rows + 1])) % 32,
                    np.unique(np.concatenate([cols - 1, cols, cols + 1])) % 32)] = True
+        core = np.zeros((32, 32), bool)
+        core[np.ix_(rows % 32, cols % 32)] = True
+        self._vis_core = {f.bg_map(): core}      # (layer() leaves the slack to idle())
         if hasattr(self.p, 'has_status_bar') and not self.p.has_status_bar(f):
             bbar = wbar = None      # (the preset knows there's none: an ending, a cutscene)
         else:
