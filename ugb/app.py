@@ -7,9 +7,10 @@ Controls
   Enter       Start            Backspace Select
   Tab         toggle enhanced / original
   G           generic shading: subtle / strong
+  E           eye candy on / off (the preset's EYE_CANDY effects)
   Space       hold to fast-forward
   F2 / F4     quick save / load state (states/quick.state)
-  F12         screenshot (original | enhanced) to out/shots
+  F12         screenshot (original | enhanced) and the game state to out/shots
   Esc         quit (the in-game save is written to the ROM's .ram file)
 """
 import argparse
@@ -152,6 +153,9 @@ def main():
                     running = False
                 elif ev.key == pygame.K_TAB and en:
                     enhanced = not enhanced
+                elif ev.key == pygame.K_e and en:
+                    en.eye_candy = not en.eye_candy
+                    print('eye candy:', 'on' if en.eye_candy else 'off')
                 elif ev.key == pygame.K_g and en:
                     en.generic_level = 3 - en.generic_level
                     print('generic shading:', 'strong' if en.generic_level == 2 else 'subtle')
@@ -170,6 +174,8 @@ def main():
                     o = pb.screen.ndarray[:, :, :3]
                     e = en.render(Frame(pb))
                     name = os.path.join(shots, time.strftime('%Y%m%d-%H%M%S') + '.png')
+                    with open(name[:-4] + '.state', 'wb') as sf:     # (the game too, to revisit the spot)
+                        pb.save_state(sf)
                     Image.fromarray(np.concatenate([o, e], 1)).resize((320 * 3, 144 * 3), Image.NEAREST).save(name)
                     print('screenshot', name)
             elif ev.type == pygame.KEYUP and ev.key in KEYS:

@@ -17,3 +17,6 @@ out/
 .venv/
 __pycache__/
 *.pyc
+
+# solved areas kept between sessions (ugb.render: rebuilt when the code changes)
+cache/

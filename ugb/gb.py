@@ -41,6 +41,7 @@ class Frame:
     """One frame's video state."""
 
     def __init__(self, pb):
+        self.pb = pb            # (for presets that capture whole areas: ugb.atlas)
         mem = pb.memory
         # Plain Game Boy games run in the Color's compatibility mode: one VRAM bank,
         # no attributes, and colours chosen by the boot ROM per game.
@@ -68,6 +69,9 @@ class Frame:
         self.wy = np.array([l[3] for l in lines], int)
         self.wy_reg = mem[WY]
         self.ram = mem  # for game-state lookups
+        # the emulator's picture, for checks against it (line_maps)
+        self._scr = pb.screen.ndarray[:, :, :3].copy()
+        self._line_maps = None
         if self.dmg:
             self.bgp, self.obp = mem[0xFF47], (mem[0xFF48], mem[0xFF49])
             learn = _DMG_COLOURS.setdefault(id(pb), DmgColours())
@@ -139,6 +143,58 @@ class Frame:
 
     def bg_map(self):
         return (self.lcdc >> 3) & 1
+
+    def _map_keys(self, which, by, bx):
+        """What map `which` puts at BG-layer coordinates (by, bx): palette and
+        colour index as one number (the colour index alone on plain Game Boy)."""
+        r, c = by // 8, bx // 8
+        ids = self.tile_index(self.maps[which])[r, c]
+        at = self.attrs[which][r, c]
+        py = np.where((at >> 6) & 1, 7 - by % 8, by % 8)
+        px = np.where((at >> 5) & 1, 7 - bx % 8, bx % 8)
+        idx = self.tiles[(at >> 3) & 1, ids, py, px].astype(np.int64)
+        return idx if self.dmg else (at & 7).astype(np.int64) * 4 + idx
+
+    def line_maps(self):
+        """Per screen line, the BG tile map it was drawn from (0 = $9800, 1 = $9C00).
+
+        Games can switch the map partway down the screen (LCDC bit 3: Kirby's
+        Dream Land's credits have their text on the other map). PyBoy reports
+        the scroll per line but not LCDC, so lines are checked against the
+        emulator's picture, without needing its colours: under the right map,
+        each of the map's colours (palette and index) lands on one screen
+        colour. Lines are judged in runs that share their scroll registers (a
+        game switching maps sets its scroll there too), so a blank line inside
+        a band goes with the band.
+        """
+        if self._line_maps is not None:
+            return self._line_maps
+        base = self.bg_map()
+        lm = np.full(144, base, np.int8)
+        if self.lcdc & 0x01:
+            by, bx, _, _ = np.broadcast_arrays(*self.screen_coords())
+            by, bx = by[:, ::2], bx[:, ::2]         # (every other pixel is plenty)
+            free = ~self.window_mask()[:, ::2]
+            s = self._scr[:, ::2].astype(np.int64)
+            col = (s[..., 0] << 16) | (s[..., 1] << 8) | s[..., 2]
+
+            def conflicts(m):
+                # per line: distinct (colour key, screen colour) pairs minus
+                # distinct keys = screen colours a key has beyond its first
+                combo = np.where(free, (self._map_keys(m, by, bx) << 24) | col, -1)
+                c = np.sort(combo, axis=1)
+                d = np.diff(c, axis=1)
+                return (d != 0).sum(1) - (np.diff(c >> 24, axis=1) != 0).sum(1)
+            cb = conflicts(base)
+            if cb.any():
+                co = conflicts(1 - base)
+                run = np.concatenate([[0], np.cumsum((np.diff(self.scx) != 0) | (np.diff(self.scy) != 0))])
+                for r in np.unique(run):
+                    sel = run == r
+                    if cb[sel].sum() > 0 and co[sel].sum() * 4 < cb[sel].sum():
+                        lm[sel] = 1 - base
+        self._line_maps = lm
+        return lm
 
     def win_map(self):
         return (self.lcdc >> 6) & 1
