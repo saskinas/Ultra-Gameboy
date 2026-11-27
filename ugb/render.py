@@ -1139,10 +1139,15 @@ class Enhancer:
             from ugb import atlas, lineart
             h = hashlib.blake2b(digest_size=6)
             for mod in (atlas, lineart, importlib.import_module(self.p.__name__)):
-                h.update(open(inspect.getsourcefile(mod), 'rb').read())
+                try:
+                    h.update(open(inspect.getsourcefile(mod), 'rb').read())
+                except (TypeError, OSError):     # (the packaged app has no sources: its code, then)
+                    import marshal
+                    h.update(marshal.dumps(mod.__spec__.loader.get_code(mod.__name__)))
             self._area_ver = h.hexdigest()
         name = '%s_%s_%s.npz' % (self.p.TITLE.replace(' ', ''), '-'.join(map(str, key)), self._area_ver)
-        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cache', 'areas', name)
+        from ugb.paths import data_path
+        return data_path('cache', 'areas', name)
 
     def _area_save(self, key, res):
         if res is None or len(res) < 5:

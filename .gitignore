@@ -20,3 +20,8 @@ __pycache__/
 
 # solved areas kept between sessions (ugb.render: rebuilt when the code changes)
 cache/
+
+# the packaged app (tools/build_windows.py)
+build/
+dist/
+*.spec
