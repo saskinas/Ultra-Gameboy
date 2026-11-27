@@ -24,6 +24,7 @@ import pygame
 from pyboy import PyBoy
 
 from ugb.gb import Frame, note_tick
+from ugb.paths import data_path
 from ugb.render import Enhancer
 from ugb import presets
 from ugb.roms import rom_path
@@ -135,9 +136,8 @@ def main():
     audio = Audio(pb)
     clock = pygame.time.Clock()
     enhanced = en is not None
-    qs = os.path.join(HERE, 'states', 'quick.state')
-    os.makedirs(os.path.dirname(qs), exist_ok=True)
-    shots = os.path.join(HERE, 'out', 'shots')
+    qs = data_path('states', 'quick.state')
+    shots = os.path.dirname(data_path('out', 'shots', 'x'))
     times = []
     pace = {}      # emulated frames per displayed frame (debug)
     running = True
