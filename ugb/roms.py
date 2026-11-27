@@ -4,7 +4,7 @@ import os
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALIASES = {'yellow': 'Pokemon - Yellow', 'zelda': "Link's Awakening", 'balloon': 'Balloon Kid',
-           'mario': 'Super Mario Land'}
+           'mario': 'Super Mario Land', 'kirby': "Kirby's Dream Land"}
 
 
 def rom_path(name=None):
