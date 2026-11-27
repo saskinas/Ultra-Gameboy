@@ -383,6 +383,10 @@ SPIKE_TILES = [int(h, 16) for h in ('12a131', '195f08')]
 # the starry sky (area 5): stars on the black of space, the dithered dusk band
 STAR_TILES = [int(h, 16) for h in ('41ab5e', 'a132b3', '41ae54', 'b67899', '08d1df', '6c7f65')]
 DUSK_TILES = [int('10e581', 16)]
+# (labelled, so the generic pass skips them: paint_tiles repaints every pixel
+# of space, the stars and the dusk band in the starry areas, and a doorway's
+# black elsewhere on this stage)
+STAGE_TILE_KEYS[3].update({h: 'K' for h in STAR_TILES + DUSK_TILES + [int('c5bb5f', 16)]})   # ('K': the sky fill leaves it alone)
 # the curtains (areas 4, 7): drapes of the same striped tiles as the columns,
 # told apart by hanging above their rope swags (post_solve: kind 13 cloth,
 # kind 14 the gold rope)
@@ -762,6 +766,9 @@ ROOM_STYLE = {(0, 0, 3): 'tree', (0, 1, 3): 'gallery', (0, 1, 7): 'arcade', (0, 
 
 
 _SOLID_FOR = [None, None]     # (tile labels in use, their rock and ground hashes)
+
+
+MARGIN = 2     # tiles of context around a redrawn band (3 by default; 2 draws the same here, faster)
 
 
 # ---- eye candy (docs/KIRBY_EYE_CANDY_PLAN.md): strengths for ugb.render ----

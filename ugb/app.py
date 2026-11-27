@@ -198,7 +198,9 @@ def main():
             if stepped:
                 pace[stepped] = pace.get(stepped, 0) + 1
             if not stepped:
-                time.sleep(0.002)
+                # spare time: draw a little of what's about to scroll in
+                if not (enhanced and en.idle()):
+                    time.sleep(0.002)
                 continue
         else:
             pb.tick(1, True)
